@@ -4,3 +4,4 @@ models\__pycache__
 utils\__pycache__
 .env
 .venv
+clear_commands.py
