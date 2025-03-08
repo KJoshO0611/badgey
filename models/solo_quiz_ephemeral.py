@@ -60,32 +60,43 @@ class EphemeralQuizView(discord.ui.View):
         # Create results embed
         embed = discord.Embed(
             title="Quiz Results",
-            description=f"You've completed: {quiz_name}",
+            description=f"completed: {quiz_name}",
             color=discord.Color.gold()
         )
         
         embed.add_field(
-            name="Your Score",
+            name="Score",
             value=f"**{self.score}** points",
-            inline=False
+            inline=True
         )
         
         total_questions = len(self.questions)
         embed.add_field(
             name="Questions",
             value=f"Completed {total_questions} questions",
-            inline=False
+            inline=True
         )
         
-        # Send results in ephemeral message
+        # First, send a final ephemeral message to the user
         if self.latest_response:
-            await self.latest_response.edit(content="Quiz finished!", embed=embed, view=None)
+            await self.latest_response.edit(content="Quiz finished! Your results are being posted in the channel.", embed=None, view=None)
         else:
-            await self.interaction.followup.send(content="Quiz finished!", embed=embed, ephemeral=True)
-    
+            await self.interaction.followup.send(content="Quiz finished! Your results are being posted in the channel.", ephemeral=True)
+
+        # Then post the results publicly in the channel
+        username = self.user_name if hasattr(self, 'user_name') and self.user_name else f"User-{self.user_id}"
+        
+        # Add user information to the embed
+        embed.set_footer(text=f"{username}'s Quiz Results")
+        
+        # Send results to the channel (non-ephemeral)
+        await self.interaction.channel.send(
+            content=f"<@{self.user_id}> has completed the quiz!",
+            embed=embed
+        )
+        
         # Record score in database
         try:
-            username = self.user_name if hasattr(self, 'user_name') and self.user_name else f"User-{self.user_id}"
             await record_user_score(self.user_id, username, self.quiz_id, self.score)
             logger.info(f"Recorded score for {username}: {self.score} points in quiz {self.quiz_id}")
         except Exception as e:
