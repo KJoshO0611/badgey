@@ -29,6 +29,7 @@ class DMQuizView(discord.ui.View):
         self.start_time = None
         self.current_timer = None
         self.transitioning = False
+        self.quiz_name = None
 
     async def initialize(self, quiz_id):
         """Initialize the quiz by loading questions"""
@@ -43,14 +44,51 @@ class DMQuizView(discord.ui.View):
         self.score = 0
         self.index = 0
         
-        # Send initial message to the user
+        # Get quiz name
+        quiz_result = await get_quiz_name(quiz_id)
+        self.quiz_name = quiz_result[0] if quiz_result else f"Quiz {quiz_id}"
+        
+        # Send initial message to the user with a start button
         try:
-            quiz_result = await get_quiz_name(quiz_id)
-            quiz_name = quiz_result[0] if quiz_result else f"Quiz {quiz_id}"
+            # Create a welcome embed
+            embed = discord.Embed(
+                title=f"Quiz: {self.quiz_name}",
+                description=f"This quiz contains {len(self.questions)} questions.\nYou will have {self.timer_task} seconds for each question.",
+                color=discord.Color.blue()
+            )
             
-            self.message = await self.user.send(f"Starting quiz: **{quiz_name}**...")
+            embed.add_field(
+                name="Instructions",
+                value="Click the 'Start Quiz' button when you're ready to begin.\nYour results will be reported in the server when you finish.",
+                inline=False
+            )
+            
+            # Create the Start button
+            start_button = discord.ui.Button(
+                label="Start Quiz",
+                style=discord.ButtonStyle.success,
+                custom_id="start_quiz"
+            )
+            
+            async def start_callback(interaction):
+                if interaction.user.id != self.user_id:
+                    await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                    return
+                
+                await interaction.response.defer()
+                
+                # Begin the quiz
+                self.clear_items()  # Remove the start button
+                await self.show_question()  # Show the first question
+                
+            start_button.callback = start_callback
+            self.add_item(start_button)
+            
+            # Send the welcome message with the start button
+            self.message = await self.user.send(embed=embed, view=self)
             logger.info(f"DM quiz {quiz_id} initialized with {len(self.questions)} questions for user {self.user_id}")
             return True
+            
         except discord.Forbidden:
             # User has DMs disabled
             logger.error(f"Cannot send DM to user {self.user_id} - DMs disabled")
@@ -62,14 +100,10 @@ class DMQuizView(discord.ui.View):
         if self.current_timer:
             self.current_timer.cancel()
             
-        # Get quiz name
-        quiz_result = await get_quiz_name(self.quiz_id)
-        quiz_name = quiz_result[0] if quiz_result else f"Quiz {self.quiz_id}"
-        
         # Create results embed for DM
         dm_embed = discord.Embed(
             title="Quiz Results",
-            description=f"You've completed: {quiz_name}",
+            description=f"You've completed: {self.quiz_name}",
             color=discord.Color.gold()
         )
         
@@ -95,7 +129,7 @@ class DMQuizView(discord.ui.View):
             if channel:
                 server_embed = discord.Embed(
                     title="Quiz Completed",
-                    description=f"{self.user.mention} has completed: **{quiz_name}**",
+                    description=f"{self.user.mention} has completed: **{self.quiz_name}**",
                     color=discord.Color.gold()
                 )
                 
