@@ -166,7 +166,6 @@ class QuizPlayCog(commands.Cog):
                         )
                         return
                     
-                    await view.show_question()
                     
                 except discord.Forbidden:
                     await interaction.followup.send(
