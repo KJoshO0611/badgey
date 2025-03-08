@@ -27,7 +27,7 @@ async def setup_db():
             db=CONFIG['DB']['DATABASE'],
             autocommit=True,
             connect_timeout=10,
-            pool_recycle=300
+            pool_recycle=3600
         )
         
         async with pool.acquire() as conn:
