@@ -44,7 +44,7 @@ class BadgeyBot(commands.Bot):
             logger.error(f"Failed to sync commands: {e}", exc_info=True)  # This will log the full traceback
                     
         # Set up database
-        from utils.db_utils import setup_db
+        from utils.db_utilsv2 import setup_db
         await setup_db()
         
         # No need to sync commands with Discord for text commands

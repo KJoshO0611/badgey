@@ -7,12 +7,12 @@ import json
 from config import CONFIG
 from models.quiz_view import QuizView, QuizCreationView
 from utils.helpers import has_required_role, parse_options
-from utils.db_utils import (
-    get_quiz_questions,
+from utils.db_utilsv2 import (
+    get_question,
     get_all_quizzes,
     add_question,
     update_question,
-    get_question,
+    get_quiz_questions,
     update_quiz_name,
     get_quiz_name,
     get_leaderboards,
@@ -194,7 +194,7 @@ class QuizCommandsCog(commands.Cog):
                 return
             
             # Parse current options
-            current_options = json.loads(question_data[2])
+            current_options = json.loads(question_data[3])
             
             # Parse new options if provided
             new_options = None
@@ -214,10 +214,10 @@ class QuizCommandsCog(commands.Cog):
                     return
             
             # Use existing values if new ones are not provided
-            updated_question = question if question is not None else question_data[1]
+            updated_question = question if question is not None else question_data[2]
             updated_options = new_options if new_options is not None else current_options
-            updated_correct = correct_answer if correct_answer is not None else question_data[3]
-            updated_points = points if points is not None else question_data[4]
+            updated_correct = correct_answer if correct_answer is not None else question_data[4]
+            updated_points = points if points is not None else question_data[5]
             
             # Update the question
             await update_question(
@@ -314,7 +314,14 @@ class QuizCommandsCog(commands.Cog):
                 points = question[5]
                 
                 # Format options for display
-                options_text = "\n".join([f"{key}: {value}" for key, value in options.items()])
+                # Safely handle options regardless of whether they're a string or a dictionary
+                if isinstance(options, str):
+                    options_text = options
+                else:
+                    try:
+                        options_text = "\n".join([f"{key}: {value}" for key, value in options.items()])
+                    except AttributeError:
+                        options_text = str(options)  # Fallback for any other type
                 
                 embed.add_field(
                     name=f"Question ID: {question_id}",

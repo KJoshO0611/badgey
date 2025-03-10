@@ -6,9 +6,9 @@ import logging
 import time
 from config import CONFIG
 from utils.helpers import get_random_quiz_response
-from utils.db_utils import record_user_score, get_quiz_questions
+from utils.db_utilsv2 import record_user_score, get_quiz_questions, add_quiz, add_question
 
-#logger = logging.get#logger('badgey.quiz')
+logger = logging.getLogger('badgey.quiz')
 
 class QuizButton(Button):
     """Button for quiz answers"""
@@ -196,8 +196,7 @@ class QuizCreationView(View):
                 timeout=60.0
             )
             
-            from utils.db_utils import create_quiz
-            quiz_id = await create_quiz(quiz_name_msg.content)
+            quiz_id = await add_quiz(quiz_name_msg.content, interaction.user.id)
             
             await interaction.followup.send(
                 f"Quiz '{quiz_name_msg.content}' created! Now add questions.", 
@@ -206,7 +205,7 @@ class QuizCreationView(View):
             
             self.quiz_id = quiz_id
             self.quiz_name = quiz_name_msg.content
-            #logger.info(f"Quiz '{self.quiz_name}' created with ID {self.quiz_id}")
+            logger.info(f"Quiz '{self.quiz_name}' created with ID {self.quiz_id}")
             
         except asyncio.TimeoutError:
             await interaction.followup.send("Quiz creation timed out. Please try again.", ephemeral=True)
@@ -265,7 +264,6 @@ class QuizCreationView(View):
                 score_value = 10
             
             # Add question to database
-            from utils.db_utils import add_question
             await add_question(
                 self.quiz_id, 
                 question_text.content, 

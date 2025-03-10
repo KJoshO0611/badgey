@@ -10,7 +10,7 @@ from models.solo_quiz_ephemeral import EphemeralQuizView
 from models.solo_quiz_dm import DMQuizView
 from models.scheduled_quiz import TimedQuizController
 from utils.helpers import has_required_role
-from utils.db_utils import get_quiz_name, has_taken_quiz
+from utils.db_utilsv2 import get_quiz_name, has_taken_quiz
 
 logger = logging.getLogger('badgey.quiz_creation')
 

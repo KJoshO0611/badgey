@@ -6,7 +6,7 @@ import asyncio
 import time
 import json
 from config import CONFIG
-from utils.db_utils import get_quiz_questions, record_user_score, get_quiz_name
+from utils.db_utilsv2 import get_quiz_questions, record_user_score, get_quiz_name
 
 logger = logging.getLogger('badgey.individual_quiz')
 

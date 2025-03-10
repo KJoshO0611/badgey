@@ -4,7 +4,7 @@ from discord import app_commands
 import logging
 from config import CONFIG
 from utils.helpers import has_required_role
-from utils.db_utils import delete_scores
+from utils.db_utilsv2 import delete_scores
 
 logger = logging.getLogger('badgey.Admin')
 
