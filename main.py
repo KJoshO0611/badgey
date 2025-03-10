@@ -35,17 +35,8 @@ class BadgeyBot(commands.Bot):
                     logger.error(f"Failed to load cog {filename}: {e}")
         
         try:
- 
-            #guild = discord.Object(id=CONFIG['GUILD_ID'])
-            #guild2 = discord.Object(id=CONFIG['GUILD_ID2'])
-            #self.tree.copy_global_to(guild=guild)
-            #self.tree.copy_global_to(guild=guild2)
-            #await self.tree.sync(guild=guild)
-           #await self.tree.sync(guild=guild2)
-
             GUILD_IDS = CONFIG['GUILD_ID']
-            logger.info(f"{GUILD_IDS}")
-            
+
             for guild_id in GUILD_IDS:
                 logger.info(f"Attempting to sync commands to guild ID: {guild_id}")
                 guild = discord.Object(id=guild_id)
