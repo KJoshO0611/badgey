@@ -5,82 +5,11 @@ import logging
 import asyncio
 import json
 import time
-import random
 from datetime import datetime, timedelta
 from config import CONFIG
 from utils.db_utilsv2 import get_quiz_questions, record_user_score, get_quiz_name
 
-# Add these imports if not already present
-import functools
-import backoff
-from typing import Dict, Set, Deque
-from collections import deque
-
 logger = logging.getLogger('badgey.timed_quiz')
-
-# Setup for rate limiting
-class RateLimiter:
-    """Rate limiter for button interactions"""
-    def __init__(self):
-        self.cooldowns: Dict[int, float] = {}  # player_id: timestamp
-        self.interaction_queue: Dict[int, Deque] = {}  # player_id: queue of interactions
-        self.processing: Set[int] = set()  # Set of player_ids currently being processed
-        self.default_cooldown = 0.5  # seconds
-        
-    def is_rate_limited(self, player_id: int) -> bool:
-        """Check if a player is currently rate limited"""
-        if player_id in self.cooldowns:
-            if time.time() - self.cooldowns[player_id] < self.default_cooldown:
-                return True
-        return False
-    
-    def update_timestamp(self, player_id: int):
-        """Update the last interaction timestamp for a player"""
-        self.cooldowns[player_id] = time.time()
-    
-    def add_to_queue(self, player_id: int, callback_func, *args, **kwargs):
-        """Add an interaction to the queue for processing"""
-        if player_id not in self.interaction_queue:
-            self.interaction_queue[player_id] = deque()
-        
-        # Store the callback and arguments
-        self.interaction_queue[player_id].append((callback_func, args, kwargs))
-        
-    async def process_queue(self, player_id: int):
-        """Process the queue for a specific player"""
-        if player_id in self.processing:
-            return  # Already processing this player's queue
-        
-        self.processing.add(player_id)
-        
-        try:
-            while player_id in self.interaction_queue and self.interaction_queue[player_id]:
-                # Wait for cooldown if needed
-                if self.is_rate_limited(player_id):
-                    await asyncio.sleep(self.default_cooldown)
-                
-                # Get the next interaction
-                callback_func, args, kwargs = self.interaction_queue[player_id].popleft()
-                
-                # Update timestamp
-                self.update_timestamp(player_id)
-                
-                # Execute the callback
-                try:
-                    await callback_func(*args, **kwargs)
-                except Exception as e:
-                    logging.error(f"Error processing queued interaction: {e}")
-                
-                # Small delay between processing items
-                await asyncio.sleep(0.1)
-                
-            # Clear empty queues
-            if player_id in self.interaction_queue and not self.interaction_queue[player_id]:
-                del self.interaction_queue[player_id]
-                
-        finally:
-            self.processing.remove(player_id)
-
 
 class QuizRegistrationView(discord.ui.View):
     """View for players to register for an upcoming quiz"""
@@ -193,67 +122,32 @@ class QuizRegistrationView(discord.ui.View):
         self.recover_button.disabled = False
 
 
-# Modify PlayerAnswerButton to use rate limiting
 class PlayerAnswerButton(discord.ui.Button):
-    """Button for a player to answer the current question with rate limiting"""
+    """Button for a player to answer the current question"""
     def __init__(self, option_key, option_value, parent_view):
-        # Generate a unique ID for each button instance
-        unique_id = f"answer_{option_key}_{random.randint(10000, 99999)}"
-        
         super().__init__(
             label=f"{option_key}", 
             style=discord.ButtonStyle.primary, 
-            custom_id=unique_id
+            custom_id=f"answer_{option_key}"
         )
         self.option_key = option_key
         self.option_value = option_value
         self.parent_view = parent_view
         
     async def callback(self, interaction: discord.Interaction):
+
         # Immediately defer the interaction to prevent timeouts
         await interaction.response.defer(ephemeral=True)
         
-        # Check if this is the right user
         if interaction.user.id != self.parent_view.player_id:
-            await interaction.followup.send("This isn't your quiz interface!", ephemeral=True)
+            await interaction.response.send_message("This isn't your quiz interface!", ephemeral=True)
             return
         
-        # Get the rate limiter from the parent quiz
-        rate_limiter = self.parent_view.parent_quiz.rate_limiter
-        
-        # Check if rate limited
-        if rate_limiter.is_rate_limited(interaction.user.id):
-            # Queue this interaction for later processing
-            rate_limiter.add_to_queue(
-                interaction.user.id,
-                self.process_answer,
-                interaction
-            )
-            
-            # Start queue processing if not already running
-            self.parent_view.parent_quiz.create_task(
-                rate_limiter.process_queue(interaction.user.id)
-            )
-            
-            await interaction.followup.send("Processing your answer...", ephemeral=True)
-        else:
-            # Process immediately
-            rate_limiter.update_timestamp(interaction.user.id)
-            await self.process_answer(interaction)
-    
-    @backoff.on_exception(
-        backoff.expo,
-        discord.errors.HTTPException,
-        max_tries=3,
-        giveup=lambda e: e.code == 50027  # Give up on invalid webhook token
-    )
-    async def process_answer(self, interaction):
-        """Process the answer with retry logic"""
         # Check if player has already answered this question
         question_id = self.parent_view.question_data[0]
         if (question_id in self.parent_view.parent_quiz.player_answers and 
             self.parent_view.player_id in self.parent_view.parent_quiz.player_answers[question_id]):
-            await interaction.followup.send("You've already answered this question!", ephemeral=True)
+            await interaction.response.send_message("You've already answered this question!", ephemeral=True)
             return
 
         # Check if the quiz is still in progress
@@ -273,7 +167,7 @@ class PlayerAnswerButton(discord.ui.Button):
         max_score = self.parent_view.question_data[5]
         
         try:
-            # Record answer
+            # Record answer - this will now handle updating the message
             await self.parent_view.parent_quiz.record_player_answer(
                 self.parent_view.player_id, 
                 self.parent_view.question_data[0],  # question_id
@@ -291,7 +185,7 @@ class PlayerAnswerButton(discord.ui.Button):
                     # Message may have been deleted
                     pass
         except Exception as e:
-            logging.error(f"Error recording answer: {e}")
+            logger.error(f"Error recording answer: {e}")
             await interaction.followup.send("There was an error recording your answer. Please try again or use the recovery button.", ephemeral=True)
             # Re-enable buttons in case of error
             for item in self.parent_view.children:
@@ -302,7 +196,6 @@ class PlayerAnswerButton(discord.ui.Button):
                     await self.parent_view.message.edit(view=self.parent_view)
                 except discord.errors.NotFound:
                     pass
-
 
 class PlayerAnswerView(discord.ui.View):
     """Individual view for a player to answer the current question"""
@@ -332,9 +225,8 @@ class PlayerAnswerView(discord.ui.View):
             self.has_answered = True
 
 class TimedQuizController:
-    """Controller for the timed quiz game with improved concurrency handling"""
+    """Controller for the timed quiz game"""
     def __init__(self, channel, quiz_id, start_time, timer=20):
-        # Original initialization code remains the same
         self.channel = channel
         self.quiz_id = quiz_id
         self.start_time = start_time
@@ -347,106 +239,30 @@ class TimedQuizController:
         self.announcement_message = None
         self.question_message = None
         self.player_quiz_messages = {}  # {player_id: message}
-        self.current_question_index = -1
-        self.current_question_data = None
-        self.quiz_status = "not_started"
-        
-        # Add rate limiter
-        self.rate_limiter = RateLimiter()
-        
-        # Enhanced locking strategy
-        self.player_answer_lock = asyncio.Lock()
+        self.current_question_index = -1  # Track the current question index
+        self.current_question_data = None  # Track the current question data
+        self.quiz_status = "not_started"  # Status: not_started, in_progress, showing_answer, finished
+        self.player_answer_lock = asyncio.Lock() # Add locks for critical sections
         self.player_interface_lock = {}  # Will be created per player as needed
-        self.message_edit_locks = {}  # {message_id: lock} for preventing concurrent edits
     
-    # Improved error handling decorator
     def catch_and_log(func):
-        """Decorator for catching and logging errors in asynchronous functions with retry logic"""
-        @functools.wraps(func)
+        """Decorator for catching and logging errors in asynchronous functions"""
         async def wrapper(self, *args, **kwargs):
-            max_retries = 3
-            retry_delay = 1.0
-            
-            for attempt in range(max_retries):
-                try:
-                    return await func(self, *args, **kwargs)
-                except discord.errors.NotFound:
-                    # Message not found or deleted - no point retrying
-                    logging.warning(f"{func.__name__} - Discord message not found")
-                    return None
-                except discord.errors.Forbidden:
-                    # Missing permissions - no point retrying
-                    logging.error(f"{func.__name__} - Missing permissions to perform action")
-                    return None
-                except discord.errors.HTTPException as e:
-                    if e.code == 50027:  # Invalid Webhook Token
-                        # No point retrying
-                        return None
-                    elif e.code == 429:  # Rate limited
-                        # Calculate retry after time
-                        retry_after = e.response.headers.get('Retry-After', retry_delay)
-                        retry_after = float(retry_after) if retry_after else retry_delay
-                        logging.warning(f"{func.__name__} - Rate limited, retrying in {retry_after} seconds")
-                        await asyncio.sleep(retry_after)
-                        # Increase delay for next attempt
-                        retry_delay *= 2
-                        continue
-                    else:
-                        # Other HTTP error
-                        logging.error(f"{func.__name__} - Discord API error: {e}")
-                        if attempt < max_retries - 1:
-                            await asyncio.sleep(retry_delay)
-                            retry_delay *= 2
-                            continue
-                        return None
-                except Exception as e:
-                    logging.error(f"{func.__name__} - Unexpected error: {e}", exc_info=True)
-                    if attempt < max_retries - 1:
-                        await asyncio.sleep(retry_delay)
-                        retry_delay *= 2
-                        continue
-                    return None
-            return None
-        return wrapper
-    
-        # Add this method for safe message editing
-    async def safe_message_edit(self, message, **kwargs):
-        """Thread-safe message editing with lock per message"""
-        if not message:
-            return False
-            
-        # Get or create lock for this message
-        message_id = str(message.id)
-        if message_id not in self.message_edit_locks:
-            self.message_edit_locks[message_id] = asyncio.Lock()
-            
-        async with self.message_edit_locks[message_id]:
             try:
-                await message.edit(**kwargs)
-                return True
+                return await func(self, *args, **kwargs)
             except discord.errors.NotFound:
-                # Message was deleted
-                if message_id in self.message_edit_locks:
-                    del self.message_edit_locks[message_id]
-                return False
+                # Message not found or deleted
+                logger.warning(f"{func.__name__} - Discord message not found")
+            except discord.errors.Forbidden:
+                # Missing permissions
+                logger.error(f"{func.__name__} - Missing permissions to perform action")
             except discord.errors.HTTPException as e:
-                if e.code == 50027:  # Invalid Webhook Token
-                    if message_id in self.message_edit_locks:
-                        del self.message_edit_locks[message_id]
-                    return False
-                elif e.code == 429:  # Rate limited
-                    retry_after = e.response.headers.get('Retry-After', 1.0)
-                    retry_after = float(retry_after) if retry_after else 1.0
-                    await asyncio.sleep(retry_after)
-                    # Try once more
-                    await message.edit(**kwargs)
-                    return True
-                else:
-                    logging.error(f"HTTP error editing message: {e}")
-                    return False
+                # Generic Discord API error
+                logger.error(f"{func.__name__} - Discord API error: {e}")
+                # If rate limited, retry with exponential backoff could be implemented here
             except Exception as e:
-                logging.error(f"Error editing message: {e}")
-                return False
+                logger.error(f"{func.__name__} - Unexpected error: {e}", exc_info=True)
+        return wrapper
 
     async def initialize(self):
         """Initialize the quiz by loading questions and quiz name"""
@@ -553,10 +369,9 @@ class TimedQuizController:
         
         return True
     
-    # Make sure to include the rate_limiter in the TimedQuizController initialization and cleanups
     async def cleanup(self):
         """Clean up resources when quiz ends"""
-        # Original cleanup code...
+        # Clear player messages dictionary to free memory
         self.player_quiz_messages.clear()
         
         # Clear any pending tasks
@@ -572,20 +387,14 @@ class TimedQuizController:
                 except asyncio.CancelledError:
                     pass
                 except Exception as e:
-                    logging.error(f"Error cancelling task: {e}")
+                    logger.error(f"Error cancelling task: {e}")
         
         # Clear locks
         self.player_interface_lock.clear()
-        self.message_edit_locks.clear()
-        
-        # Clear rate limiter data
-        self.rate_limiter.cooldowns.clear()
-        self.rate_limiter.interaction_queue.clear()
-        self.rate_limiter.processing.clear()
         
         # Set quiz as finished
         self.quiz_status = "finished"
-        logging.info(f"Quiz {self.quiz_id} cleanup complete")
+        logger.info(f"Quiz {self.quiz_id} cleanup complete")
 
     # Modify run_quiz to use cleanup
     async def run_quiz(self):
@@ -706,14 +515,17 @@ class TimedQuizController:
         # Short pause between questions
         await asyncio.sleep(3)
 
-    # Update record_player_answer with improved locking and retry logic
     async def record_player_answer(self, player_id, question_id, answer, correct_answer, time_taken, max_score):
-        """Record a player's answer and update score with improved concurrency handling"""
+        """Record a player's answer and update score with race condition protection"""
         async with self.player_answer_lock:
+            # Get or create player-specific lock
+            if player_id not in self.player_interface_lock:
+                self.player_interface_lock[player_id] = asyncio.Lock()
+            
             # Check again if player already answered (might have changed while waiting for lock)
             if (question_id in self.player_answers and 
                 player_id in self.player_answers[question_id]):
-                logging.warning(f"Race condition caught: Player {player_id} already answered question {question_id}")
+                logger.warning(f"Race condition caught: Player {player_id} already answered question {question_id}")
                 return
                 
             if question_id not in self.player_answers:
@@ -734,35 +546,35 @@ class TimedQuizController:
                     self.player_scores[player_id] = 0
                         
                 self.player_scores[player_id] += scored_points
-                logging.debug(f"Player {player_id} scored {scored_points} points on question {question_id}")
+                logger.debug(f"Player {player_id} scored {scored_points} points on question {question_id}")
 
-        # Get or create player-specific lock
-        if player_id not in self.player_interface_lock:
-            self.player_interface_lock[player_id] = asyncio.Lock()
-            
-        # Update the player's message - separate lock per player
-        async with self.player_interface_lock[player_id]:
-            player_message = self.player_quiz_messages.get(player_id)
-            if player_message:
-                if answer == correct_answer:
-                    time_penalty_ratio = max(0, 1 - (time_taken / self.timer))
-                    scored_points = int(max_score * time_penalty_ratio)
-                    await self.safe_message_edit(
-                        player_message,
-                        content=f"✅ Correct! You earned {scored_points} points.", 
-                        view=None  # Remove the buttons
-                    )
-                else:
-                    await self.safe_message_edit(
-                        player_message,
-                        content=f"❌ Incorrect.", 
-                        view=None  # Remove the buttons
-                    )
+        # Update the player's message asynchronously - separate lock per player
+        async with self.player_interface_lock.get(player_id, asyncio.Lock()):
+            try:
+                player_message = self.player_quiz_messages.get(player_id)
+                if player_message:
+                    if answer == correct_answer:
+                        time_penalty_ratio = max(0, 1 - (time_taken / self.timer))
+                        scored_points = int(max_score * time_penalty_ratio)
+                        await player_message.edit(
+                            content=f"✅ Correct! You earned {scored_points} points.", 
+                            view=None  # Remove the buttons
+                        )
+                    else:
+                        await player_message.edit(
+                            content=f"❌ Incorrect.", 
+                            view=None  # Remove the buttons
+                        )
+            except discord.errors.NotFound:
+                # Message was deleted
+                logger.warning(f"Could not update answer for player {player_id} - message not found")
+                self.player_quiz_messages.pop(player_id, None)
+            except Exception as e:
+                logger.error(f"Error updating answer for player {player_id}: {e}")
 
-    # Update update_player_interface to use safe_message_edit
     @catch_and_log
     async def update_player_interface(self, player_id):
-        """Update a player's interface with the current question with improved concurrency handling"""
+        """Update a player's interface with the current question with improved error handling"""
         if self.current_question_index < 0 or not self.current_question_data:
             # No active question
             return False
@@ -779,45 +591,49 @@ class TimedQuizController:
             
         # Use the lock to prevent concurrent edits
         async with self.player_interface_lock[player_id]:
-            # Get question data
-            question_id = self.current_question_data[0]
-            question_text = self.current_question_data[2]
-            
-            # Check if player already answered this question
-            already_answered = (question_id in self.player_answers and 
-                      player_id in self.player_answers[question_id])
-            
-            # Create a new view for the current question
-            view = PlayerAnswerView(player_id, self.current_question_data, self.timer, self)
-            
-            # If player already answered, disable all buttons
-            if already_answered:
-                for item in view.children:
-                    if isinstance(item, discord.ui.Button):
-                        item.disabled = True
-            
-            # Update the existing message with the new question and view
-            content = f"Question {self.current_question_index + 1}: {question_text}"
-            if already_answered:
-                player_answer = self.player_answers[question_id][player_id]["answer"]
-                content += f"\n\nYou already answered: {player_answer}"
+            try:
+                # Get question data
+                question_id = self.current_question_data[0]
+                question_text = self.current_question_data[2]
                 
-            success = await self.safe_message_edit(
-                player_message,
-                content=content,
-                view=view,
-                embed=None  # Remove any previous embeds
-            )
-            
-            if success:
+                # Check if player already answered this question
+                already_answered = (question_id in self.player_answers and 
+                            player_id in self.player_answers[question_id])
+                
+                # Create a new view for the current question
+                view = PlayerAnswerView(player_id, self.current_question_data, self.timer, self)
+                
+                # If player already answered, disable all buttons
+                if already_answered:
+                    for item in view.children:
+                        if isinstance(item, discord.ui.Button):
+                            item.disabled = True
+                
+                # Update the existing message with the new question and view
+                content = f"Question {self.current_question_index + 1}: {question_text}"
+                if already_answered:
+                    player_answer = self.player_answers[question_id][player_id]["answer"]
+                    content += f"\n\nYou already answered: {player_answer}"
+                    
+                await player_message.edit(
+                    content=content,
+                    view=view,
+                    embed=None  # Remove any previous embeds
+                )
+                
                 # Store the view's message reference for timeout handling
                 view.message = player_message
                 return True
-            else:
-                # Message edit failed, remove from tracking
+                
+            except discord.errors.NotFound:
+                # Message was deleted, remove from tracking
+                logger.warning(f"Message not found for player {player_id}")
                 self.player_quiz_messages.pop(player_id, None)
                 return False
-
+            except Exception as e:
+                logger.error(f"Error updating interface for player {player_id}: {e}")
+                return False
+    
     @catch_and_log
     async def show_answer_to_player(self, player_id, question_id, correct_answer):
         """Show the answer for the current question to a player"""
@@ -1034,3 +850,25 @@ class TimedQuizController:
         
         # Send results
         await self.question_message.edit(embed=embed)
+
+    # Add this method to handle recovery more gracefully
+    async def safe_message_edit(self, message, **kwargs):
+        """Safely edit a message with proper error handling"""
+        if not message:
+            return False
+            
+        try:
+            await message.edit(**kwargs)
+            return True
+        except discord.errors.NotFound:
+            # Message was deleted
+            return False
+        except discord.errors.HTTPException as e:
+            if e.code == 50027:  # Invalid Webhook Token
+                return False
+            else:
+                logger.error(f"HTTP error editing message: {e}")
+                return False
+        except Exception as e:
+            logger.error(f"Error editing message: {e}")
+            return False

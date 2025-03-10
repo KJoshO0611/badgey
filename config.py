@@ -1,13 +1,13 @@
 import os
-from dotenv import load_dotenv
+#from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv()
+#load_dotenv()
 
 # Bot configuration
 CONFIG = {
     'TOKEN': os.getenv('TOKEN'),
-    'GUILD_ID': int(os.getenv('GUILDID')),
+    'GUILD_ID': os.getenv('GUILDID').split(','),
     'PREFIX': '-',
     'REQUIRED_ROLES': ["Secret", "Community Managers", "Admin"],
     'DB': {

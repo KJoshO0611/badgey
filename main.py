@@ -23,7 +23,7 @@ class BadgeyBot(commands.Bot):
         
     async def setup_hook(self):
         # Load all cogs
-        logging.info(f"Guild ID: {CONFIG['GUILD_ID']}")
+        #logging.info(f"Guild ID: {CONFIG['GUILD_ID']}")
         logging.info("Token loaded from config")
 
         for filename in os.listdir('./cogs'):
@@ -35,10 +35,25 @@ class BadgeyBot(commands.Bot):
                     logger.error(f"Failed to load cog {filename}: {e}")
         
         try:
-            logger.info(f"Attempting to sync commands to guild ID: {CONFIG['GUILD_ID']}")
-            guild = discord.Object(id=CONFIG['GUILD_ID'])
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
+ 
+            #guild = discord.Object(id=CONFIG['GUILD_ID'])
+            #guild2 = discord.Object(id=CONFIG['GUILD_ID2'])
+            #self.tree.copy_global_to(guild=guild)
+            #self.tree.copy_global_to(guild=guild2)
+            #await self.tree.sync(guild=guild)
+           #await self.tree.sync(guild=guild2)
+
+            GUILD_IDS = CONFIG['GUILD_ID']
+            logger.info(f"{GUILD_IDS}")
+            
+            for guild_id in GUILD_IDS:
+                logger.info(f"Attempting to sync commands to guild ID: {guild_id}")
+                guild = discord.Object(id=guild_id)
+                self.tree.copy_global_to(guild=guild)
+                await self.tree.sync(guild=guild)
+                logger.info(f"Synced commands to guild {guild_id}")
+
+
             logger.info("Commands synced successfully")
         except Exception as e:
             logger.error(f"Failed to sync commands: {e}", exc_info=True)  # This will log the full traceback
