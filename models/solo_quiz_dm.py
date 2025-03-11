@@ -342,37 +342,80 @@ class DMQuizView:
                             if isinstance(item, discord.ui.Button):
                                 item.disabled = True
                     
-                    # Add next button
-                    next_view = discord.ui.View()
-                    next_button = discord.ui.Button(
-                        label="Next Question", 
-                        style=discord.ButtonStyle.primary,
-                        custom_id=f"next_{question_instance_id}"
-                    )
+                    # Check if this is the last question
+                    is_last_question = question_index == len(self.questions) - 1
                     
-                    async def next_callback(interaction):
-                        if interaction.user.id != self.user_id:
-                            await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
-                            return
+                    if is_last_question:
+                        # Add End Quiz button
+                        next_view = discord.ui.View()
+                        end_button = discord.ui.Button(
+                            label="End Quiz", 
+                            style=discord.ButtonStyle.success,
+                            custom_id=f"end_{question_instance_id}"
+                        )
                         
-                        # Verify this is for the current question
-                        interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
-                        if question_instance_id != interaction_id:
-                            await interaction.response.send_message(
-                                "This button is no longer active.",
-                                ephemeral=True
-                            )
-                            return
+                        async def end_callback(interaction):
+                            if interaction.user.id != self.user_id:
+                                await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                                return
+                            
+                            # Verify this is for the current question
+                            interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
+                            if question_instance_id != interaction_id:
+                                await interaction.response.send_message(
+                                    "This button is no longer active.",
+                                    ephemeral=True
+                                )
+                                return
+                            
+                            await interaction.response.defer()
+                            # End the quiz
+                            await self.end_quiz()
                         
-                        await interaction.response.defer()
-                        # Move to next question
-                        self.is_running = True
-                        self.current_index += 1
-                        # Add this line to explicitly trigger the next question
-                        asyncio.create_task(self.show_question())
-                    
-                    next_button.callback = next_callback
-                    next_view.add_item(next_button)
+                        end_button.callback = end_callback
+                        next_view.add_item(end_button)
+                        
+                        # Add message about auto-ending
+                        embed.add_field(
+                            name="Quiz Completion",
+                            value="This is the final question. Press 'End Quiz' to see your results. The quiz will automatically end in 60 seconds.",
+                            inline=False
+                        )
+                        
+                        # Create a task to automatically end the quiz after timeout
+                        asyncio.create_task(self.auto_end_quiz(60))
+                    else:
+                        # Add Next Question button for non-last questions
+                        next_view = discord.ui.View()
+                        next_button = discord.ui.Button(
+                            label="Next Question", 
+                            style=discord.ButtonStyle.primary,
+                            custom_id=f"next_{question_instance_id}"
+                        )
+                        
+                        async def next_callback(interaction):
+                            if interaction.user.id != self.user_id:
+                                await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                                return
+                            
+                            # Verify this is for the current question
+                            interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
+                            if question_instance_id != interaction_id:
+                                await interaction.response.send_message(
+                                    "This button is no longer active.",
+                                    ephemeral=True
+                                )
+                                return
+                            
+                            await interaction.response.defer()
+                            # Move to next question
+                            self.is_running = True
+                            self.current_index += 1
+                            # Add this line to explicitly trigger the next question
+                            asyncio.create_task(self.show_question())
+                        
+                        next_button.callback = next_callback
+                        next_view.add_item(next_button)
                     
                     try:
                         await message.edit(embed=embed, view=next_view)
@@ -381,7 +424,7 @@ class DMQuizView:
             
         except Exception as e:
             logger.error(f"Error in timer: {e}")
-    
+        
     async def process_answer(self, message, chosen_answer, correct_answer, max_score, start_time):
         """Process a user's answer"""
         try:
@@ -406,8 +449,8 @@ class DMQuizView:
                     button = discord.ui.Button(
                         label=key, 
                         style=discord.ButtonStyle.primary if key != chosen_answer and key != correct_answer else
-                              discord.ButtonStyle.success if key == correct_answer else
-                              discord.ButtonStyle.danger,
+                            discord.ButtonStyle.success if key == correct_answer else
+                            discord.ButtonStyle.danger,
                         disabled=True
                     )
                     new_view.add_item(button)
@@ -434,36 +477,79 @@ class DMQuizView:
                     inline=False
                 )
             
-            # Add next button
-            next_button = discord.ui.Button(
-                label="Next Question", 
-                style=discord.ButtonStyle.primary,
-                custom_id=f"next_{question_instance_id}"
-            )
+            # Check if this is the last question
+            is_last_question = self.current_index == len(self.questions) - 1
             
-            async def next_callback(interaction):
-                if interaction.user.id != self.user_id:
-                    await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
-                    return
+            if is_last_question:
+                # Add End Quiz button for the last question
+                end_button = discord.ui.Button(
+                    label="End Quiz", 
+                    style=discord.ButtonStyle.success,
+                    custom_id=f"end_{question_instance_id}"
+                )
                 
-                # Verify this is for the current question
-                interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
-                if question_instance_id != interaction_id:
-                    await interaction.response.send_message(
-                        "This button is no longer active.",
-                        ephemeral=True
-                    )
-                    return
+                async def end_callback(interaction):
+                    if interaction.user.id != self.user_id:
+                        await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                        return
+                    
+                    # Verify this is for the current question
+                    interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
+                    if question_instance_id != interaction_id:
+                        await interaction.response.send_message(
+                            "This button is no longer active.",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    await interaction.response.defer()
+                    # End the quiz
+                    await self.end_quiz()
                 
-                await interaction.response.defer()
-                # Move to next question
-                self.is_running = True
-                self.current_index += 1
-                # Add this line to explicitly trigger the next question
-                asyncio.create_task(self.show_question())
-            
-            next_button.callback = next_callback
-            new_view.add_item(next_button)
+                end_button.callback = end_callback
+                new_view.add_item(end_button)
+                
+                # Set timeout to automatically end the quiz after 60 seconds
+                embed.add_field(
+                    name="Quiz Completion",
+                    value="This is the final question. Press 'End Quiz' to see your results. The quiz will automatically end in 60 seconds.",
+                    inline=False
+                )
+                
+                # Create a task to automatically end the quiz after timeout
+                asyncio.create_task(self.auto_end_quiz(60))
+                
+            else:
+                # Add next button for non-last questions
+                next_button = discord.ui.Button(
+                    label="Next Question", 
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"next_{question_instance_id}"
+                )
+                
+                async def next_callback(interaction):
+                    if interaction.user.id != self.user_id:
+                        await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                        return
+                    
+                    # Verify this is for the current question
+                    interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
+                    if question_instance_id != interaction_id:
+                        await interaction.response.send_message(
+                            "This button is no longer active.",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    await interaction.response.defer()
+                    # Move to next question
+                    self.is_running = True
+                    self.current_index += 1
+                    # Add this line to explicitly trigger the next question
+                    asyncio.create_task(self.show_question())
+                
+                next_button.callback = next_callback
+                new_view.add_item(next_button)
                     
             # Update the message
             try:
@@ -485,6 +571,37 @@ class DMQuizView:
     async def end_quiz(self):
         """End the quiz and show results"""
         try:
+            # Set flag to indicate quiz is finished to prevent other processes from interfering
+            self.is_running = False
+            
+            # Check if we've already ended this quiz
+            if hasattr(self, '_quiz_ended') and self._quiz_ended:
+                logger.info(f"Quiz {self.quiz_instance_id} has already ended, ignoring duplicate end call")
+                return
+                
+            # Mark quiz as ended
+            self._quiz_ended = True
+            
+            logger.info(f"Ending quiz {self.quiz_instance_id} for user {self.user_id}")
+            
+            # First, update the last question message if it exists
+            if self.current_message:
+                try:
+                    # Create a completely new embed instead of copying the old one
+                    clean_embed = discord.Embed(
+                        title="Quiz Complete",
+                        description="Thank you for participating in this quiz! Your results are below.",
+                        color=discord.Color.green()
+                    )
+                    
+                    # Update the message with the clean embed and no buttons
+                    await self.current_message.edit(embed=clean_embed, view=None)
+                    
+                    logger.info(f"Updated final question message for user {self.user_id}")
+                except Exception as e:
+                    logger.error(f"Failed to update last question message: {e}")
+            
+            # Rest of the method remains unchanged
             # Get quiz name
             quiz_result = await get_quiz_name(self.quiz_id)
             quiz_name = quiz_result[0] if quiz_result else f"Quiz {self.quiz_id}"
@@ -513,7 +630,10 @@ class DMQuizView:
             dm_embed.set_footer(text=f"Quiz ID: {self.quiz_instance_id}")
             
             # Send DM results
-            await self.user.send(content="Quiz finished!", embed=dm_embed)
+            try:
+                await self.user.send(content="Quiz finished!", embed=dm_embed)
+            except Exception as e:
+                logger.error(f"Failed to send final results DM: {e}")
             
             # Now send results to the server channel
             try:
@@ -552,3 +672,39 @@ class DMQuizView:
                 
         except Exception as e:
             logger.error(f"Error ending quiz: {e}")
+            # Even if there was an error, we should try to record the score
+            try:
+                await record_user_score(self.user_id, self.user_name, self.quiz_id, self.score)
+                logger.info(f"Recorded score after error for {self.user_name}: {self.score} points in quiz {self.quiz_id}")
+            except:
+                pass
+
+    async def auto_end_quiz(self, timeout_seconds):
+        """Automatically end the quiz after a timeout period if not ended by user"""
+        try:
+            # Wait for the specified timeout period
+            await asyncio.sleep(timeout_seconds)
+            
+            # Check if we're still on the last question
+            if self.current_index == len(self.questions) - 1:
+                logger.info(f"Auto-ending quiz for user {self.user_id} after {timeout_seconds} second timeout")
+                
+                # Force the quiz to end by setting running to false
+                self.is_running = False
+                
+                # Send a message to the user
+                try:
+                    await self.user.send("The quiz has automatically ended due to inactivity. Here are your results:")
+                except:
+                    logger.error(f"Failed to send auto-end message to user {self.user_id}")
+                    
+                # Directly call end_quiz without any further conditions
+                await self.end_quiz()
+        except Exception as e:
+            logger.error(f"Error in auto_end_quiz: {e}")
+            # Try to force end the quiz even if there was an error
+            try:
+                self.is_running = False
+                await self.end_quiz()
+            except Exception as inner_e:
+                logger.error(f"Failed to force end quiz after error: {inner_e}")
