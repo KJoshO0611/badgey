@@ -127,6 +127,7 @@ class EphemeralQuizView(discord.ui.View):
         self.lock = asyncio.Lock()
         self.start_time = None
         self.current_timer = None
+        self.auto_end_timer = None  # Added for auto-ending quiz
         self.transitioning = False
         self.latest_response = None  # Store the latest interaction response
         self.message_id = self._generate_message_id()  # Unique message ID for this quiz instance
@@ -176,7 +177,7 @@ class EphemeralQuizView(discord.ui.View):
         # Cancel any running timer
         if self.current_timer:
             self.current_timer.cancel()
-            
+                
         # Get quiz name with retry logic
         quiz_name = f"Quiz {self.quiz_id}"  # Default name
         retries = 0
@@ -214,28 +215,89 @@ class EphemeralQuizView(discord.ui.View):
         # Add unique identifier to footer
         embed.set_footer(text=f"Quiz ID: {self.message_id}")
         
-        # Send results in ephemeral message with retry logic
+        # Update the last question with a thank you message
+        thank_you_embed = discord.Embed(
+            title="Thank You for Participating!",
+            description=f"You've completed the quiz '{quiz_name}'. Your results are being sent to the channel.",
+            color=discord.Color.green()
+        )
+        
+        # Create an empty view with no buttons to replace the current view
+        empty_view = discord.ui.View()
+        
+        # Edit the question message with the thank you message and no buttons
         retries = 0
         while retries < self.max_retries:
             try:
                 if self.latest_response:
-                    await self.latest_response.edit(content="Quiz finished!", embed=embed, view=None)
-                else:
-                    await self.interaction.followup.send(content="Quiz finished!", embed=embed, ephemeral=True)
+                    await self.latest_response.edit(content=None, embed=thank_you_embed, view=empty_view)
                 break
             except discord.errors.NotFound:
-                # Message was likely deleted
-                logger.warning(f"Message not found when sending quiz results. Creating new message.")
-                self.latest_response = None
-                await self.interaction.followup.send(content="Quiz finished!", embed=embed, ephemeral=True)
+                logger.warning(f"Message not found when sending thank you message.")
                 break
             except Exception as e:
                 retries += 1
-                logger.warning(f"Error sending quiz results (attempt {retries}/{self.max_retries}): {e}")
+                logger.warning(f"Error sending thank you message (attempt {retries}/{self.max_retries}): {e}")
                 if retries >= self.max_retries:
-                    logger.error(f"Failed to send quiz results after {self.max_retries} attempts")
+                    logger.error(f"Failed to send thank you message after {self.max_retries} attempts")
                 await asyncio.sleep(2 ** retries)
-    
+        
+        # Send public results in the channel (non-ephemeral)
+        # Create a public results embed
+        public_embed = discord.Embed(
+            title="Quiz Completed",
+            description=f"<@{self.user_id}> completed: {quiz_name}",
+            color=discord.Color.gold()
+        )
+        
+        public_embed.add_field(
+                        name="Score",
+            value=f"**{self.score}** points",
+            inline=True
+        )
+                    
+        public_embed.add_field(
+            name="Questions",
+            value=f"Completed {total_questions} questions",
+            inline=True
+        )
+        
+        # Add unique identifier to footer
+        #public_embed.set_footer(text=f"Quiz ID: {self.message_id}")
+        
+        # Send public results to the channel
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                await self.interaction.channel.send(
+                    embed=public_embed
+                )
+                logger.info(f"Sent public quiz results for user {self.user_id} in channel {self.interaction.channel.id}")
+                break
+            except Exception as e:
+                retries += 1
+                logger.warning(f"Error sending public quiz results (attempt {retries}/{self.max_retries}): {e}")
+                if retries >= self.max_retries:
+                    logger.error(f"Failed to send public quiz results after {self.max_retries} attempts")
+                await asyncio.sleep(2 ** retries)
+        
+        # Send ephemeral results as well for the user's reference
+        retries = 0
+        while retries < self.max_retries:
+            try:
+                await self.interaction.followup.send(content="Quiz finished! Results have been posted in the channel.", embed=embed, ephemeral=True)
+                break
+            except discord.errors.NotFound:
+                # Message was likely deleted
+                logger.warning(f"Interaction not found when sending quiz results.")
+                break
+            except Exception as e:
+                retries += 1
+                logger.warning(f"Error sending ephemeral quiz results (attempt {retries}/{self.max_retries}): {e}")
+                if retries >= self.max_retries:
+                    logger.error(f"Failed to send ephemeral quiz results after {self.max_retries} attempts")
+                await asyncio.sleep(2 ** retries)
+        
         # Record score in database with retry logic
         retries = 0
         while retries < self.max_retries:
@@ -254,11 +316,53 @@ class EphemeralQuizView(discord.ui.View):
         # Notify the queue manager that this quiz is done
         await quiz_queue.finish_quiz(self.user_id)
 
+    async def auto_end_quiz(self, timeout_seconds=60):
+        """Automatically end the quiz after a specified timeout if user doesn't end it manually"""
+        try:
+            await asyncio.sleep(timeout_seconds)
+            
+            # Check if quiz has already ended
+            if self.user_id not in quiz_queue.active_quizzes:
+                return
+            
+            logger.info(f"Auto-ending quiz for user {self.user_id} after {timeout_seconds} seconds of inactivity")
+            
+            # Update the last question embed to thank the player
+            thank_embed = discord.Embed(
+                title="Quiz Auto-Completed",
+                description="Your quiz has been automatically completed due to inactivity. Results are being sent to the channel.",
+                color=discord.Color.yellow()
+            )
+            
+            # Create an empty view with no buttons
+            empty_view = discord.ui.View()
+            
+            # Try to update the message if it exists
+            if self.latest_response:
+                try:
+                    await self.latest_response.edit(embed=thank_embed, view=empty_view)
+                except Exception as e:
+                    logger.warning(f"Failed to update message during auto-end: {e}")
+            
+            # End the quiz
+            await self.end_quiz()
+        
+        except asyncio.CancelledError:
+            # Task was cancelled normally (user ended quiz manually)
+            pass
+        except Exception as e:
+            logger.error(f"Error in auto-end quiz timer: {e}")
+
     def cancel_timer(self):
         """Cancel the current timer if one exists"""
         if self.current_timer:
             self.current_timer.cancel()
             self.current_timer = None
+        
+        # Also cancel auto_end_timer if it exists
+        if hasattr(self, 'auto_end_timer') and self.auto_end_timer:
+            self.auto_end_timer.cancel()
+            self.auto_end_timer = None
 
     async def run_question_timer(self, embed):
         """Run a timer for the current question with error handling"""
@@ -412,6 +516,7 @@ class EphemeralQuizButton(discord.ui.Button):
         self.question_data = question_data
         self.quiz_view = quiz_view
 
+    # Modify the callback method in EphemeralQuizButton class
     async def callback(self, interaction: discord.Interaction):
         # Only the quiz owner can interact with these buttons
         if interaction.user.id != self.quiz_view.user_id:
@@ -488,28 +593,69 @@ class EphemeralQuizButton(discord.ui.Button):
                 # Update the footer with the unique ID
                 embed.set_footer(text=f"ID: {self.quiz_view.message_id}")
                 
-                # Add a "Next" button
-                next_button = discord.ui.Button(label="Next Question", style=discord.ButtonStyle.primary)
+                # Check if this is the last question
+                is_last_question = self.quiz_view.index == len(self.quiz_view.questions) - 1
                 
-                async def next_callback(next_interaction):
-                    if next_interaction.user.id != self.quiz_view.user_id:
-                        await next_interaction.response.send_message("This quiz is not for you!", ephemeral=True)
-                        return
+                # Add either "Next Question" or "End Quiz" button based on whether this is the last question
+                if is_last_question:
+                    end_button = discord.ui.Button(label="End Quiz", style=discord.ButtonStyle.primary)
+                    #
+                    async def end_callback(end_interaction):
+                        if end_interaction.user.id != self.quiz_view.user_id:
+                            await end_interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                            return
+                        
+                        await end_interaction.response.defer()
+                        
+                        # Update the last question embed to thank the player
+                        thank_embed = discord.Embed(
+                            title="Thank You!",
+                            description="Thanks for completing the quiz. Your final results are coming up!",
+                            color=discord.Color.green()
+                        )
+                        
+                        # Create an empty view with no buttons
+                        empty_view = discord.ui.View()
+                        
+                        try:
+                            await end_interaction.message.edit(embed=thank_embed, view=empty_view)
+                        except Exception as e:
+                            logger.error(f"Error updating thank you message: {e}")
+                        
+                        # End the quiz
+                        self.quiz_view.transitioning = False
+                        await self.quiz_view.end_quiz()
                     
-                    await next_interaction.response.defer()
+                    end_button.callback = end_callback
+                    self.quiz_view.add_item(end_button)
+                else:
+                    next_button = discord.ui.Button(label="Next Question", style=discord.ButtonStyle.primary)
                     
-                    # Move to the next question
-                    self.quiz_view.index += 1
-                    self.quiz_view.transitioning = False
-                    await self.quiz_view.show_question()
-                
-                next_button.callback = next_callback
-                self.quiz_view.add_item(next_button)
+                    async def next_callback(next_interaction):
+                        if next_interaction.user.id != self.quiz_view.user_id:
+                            await next_interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                            return
+                        
+                        await next_interaction.response.defer()
+                        
+                        # Move to the next question
+                        self.quiz_view.index += 1
+                        self.quiz_view.transitioning = False
+                        await self.quiz_view.show_question()
+                    
+                    next_button.callback = next_callback
+                    self.quiz_view.add_item(next_button)
                 
                 # Update message with retry logic
                 try:
                     await interaction.response.edit_message(embed=embed, view=self.quiz_view)
                     self.quiz_view.latest_response = await interaction.original_response()
+                    
+                    # Start auto-end timer if this is the last question
+                    if is_last_question:
+                        # Auto-end the quiz after 2 minutes if user doesn't manually end it
+                        self.quiz_view.auto_end_timer = asyncio.create_task(self.quiz_view.auto_end_quiz(120))
+                    
                 except discord.errors.NotFound:
                     logger.warning(f"Message not found when updating answer. Attempting to create new message.")
                     try:
@@ -519,6 +665,12 @@ class EphemeralQuizButton(discord.ui.Button):
                             view=self.quiz_view,
                             ephemeral=True
                         )
+                        
+                        # Start auto-end timer if this is the last question
+                        if is_last_question:
+                            # Auto-end the quiz after 2 minutes if user doesn't manually end it
+                            self.quiz_view.auto_end_timer = asyncio.create_task(self.quiz_view.auto_end_quiz(120))
+                    
                     except Exception as e:
                         logger.error(f"Failed to create new message after NotFound error: {e}")
                 except Exception as e:
