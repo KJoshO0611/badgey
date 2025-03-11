@@ -84,11 +84,11 @@ class QuizPlayCog(commands.Cog):
         mode="Quiz mode: regular, ephemeral, or dm"
     )
     @app_commands.choices(mode=[
-        app_commands.Choice(name="Regular", value="regular"),
+        #app_commands.Choice(name="Regular", value="regular"),
         app_commands.Choice(name="Ephemeral", value="ephemeral"),
         app_commands.Choice(name="Direct Message", value="dm")
     ])
-    async def take_quiz(self, interaction: discord.Interaction, quiz_id: int, mode: str = "regular"):
+    async def take_quiz(self, interaction: discord.Interaction, quiz_id: int, mode: str = "ephemeral"):
         # Defer response to buy time for loading
         await interaction.response.defer(ephemeral=(mode == "ephemeral" or mode == "dm"))
 
@@ -112,27 +112,27 @@ class QuizPlayCog(commands.Cog):
                 )
                 return
             
-            # Handle different quiz modes
-            if mode == "regular":
+           ## # Handle different quiz modes
+            #if mode == "regular":
                 # Regular (public) quiz
-                message = await interaction.followup.send(f"Loading quiz: {quiz_name}...")
+            #    message = await interaction.followup.send(f"Loading quiz: {quiz_name}...")
                 
-                view = IndividualQuizView(
-                    interaction.user.id, 
-                    message, 
-                    quiz_id, 
-                    timer, 
-                    interaction.user.name
-                )
-                await view.initialize(message, quiz_id)
+            #    view = IndividualQuizView(
+            #        interaction.user.id, 
+            #        message, 
+            #        quiz_id, 
+            #        timer, 
+            #        interaction.user.name
+            #    )
+            #    await view.initialize(message, quiz_id)
                 
-                if not hasattr(view, 'questions') or not view.questions:
-                    await message.edit(content="No questions found for this quiz.")
-                    return
+            #    if not hasattr(view, 'questions') or not view.questions:
+            #        await message.edit(content="No questions found for this quiz.")
+            #        return
                     
-                await view.show_question()
+            #    await view.show_question()
                 
-            elif mode == "ephemeral":
+            if mode == "ephemeral":
                 logger.info(f"User {interaction.user.id} requested quiz {quiz_id} with {timer}s timer")
                 
                 # Validate timer
@@ -150,7 +150,7 @@ class QuizPlayCog(commands.Cog):
                     quiz_id,
                     timer,
                     interaction.user.display_name
-                )
+                )##
                 
             elif mode == "dm":
                 # DM quiz - Send in direct messages and report back to channel
