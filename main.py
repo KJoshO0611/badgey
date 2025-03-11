@@ -80,11 +80,6 @@ async def main():
     except KeyboardInterrupt:
         logger.info("Shutdown initiated")
         await bot.close()
-    finally:
-        # Close database connection
-        from utils.db_utils import close_db_pool
-        await close_db_pool()
-        logger.info("Database connection closed")
 
 if __name__ == "__main__":
     asyncio.run(main())
