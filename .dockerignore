@@ -5,4 +5,3 @@ utils\__pycache__
 .env
 .venv
 dockerfile
-clear_commands.py
