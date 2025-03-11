@@ -195,21 +195,21 @@ class EphemeralQuizView(discord.ui.View):
         # Create results embed
         embed = discord.Embed(
             title="Quiz Results",
-            description=f"You've completed: {quiz_name}",
+            description=f"completed: {quiz_name}",
             color=discord.Color.gold()
         )
         
         embed.add_field(
-            name="Your Score",
+            name="Score",
             value=f"**{self.score}** points",
-            inline=False
+            inline=True
         )
         
         total_questions = len(self.questions)
         embed.add_field(
             name="Questions",
             value=f"Completed {total_questions} questions",
-            inline=False
+            inline=True
         )
         
         # Add unique identifier to footer

@@ -87,6 +87,7 @@ class QuizPlayCog(commands.Cog):
         #app_commands.Choice(name="Regular", value="regular"),
         app_commands.Choice(name="Ephemeral", value="ephemeral"),
         app_commands.Choice(name="Direct Message", value="dm")
+        app_commands.Choice(name="Direct Message", value="dm")
     ])
     async def take_quiz(self, interaction: discord.Interaction, quiz_id: int, mode: str = "ephemeral"):
         # Defer response to buy time for loading
