@@ -11,12 +11,21 @@ from models.solo_quiz_dm import DMQuizView
 from models.scheduled_quiz import TimedQuizController
 from utils.helpers import has_required_role
 from utils.db_utilsv2 import get_quiz_name, has_taken_quiz
+from models.solo_quiz_ephemeral import quiz_queue
+from models.solo_quiz_dm import QuizQueue
 
 logger = logging.getLogger('badgey.quiz_creation')
 
 class QuizPlayCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.queue = QuizQueue()
+    
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Start the queue processing task
+        self.bot.loop.create_task(self.queue.process_queue(self.bot))
+        logger.info("Quiz queue processor started")
         
     @commands.command(name="start_quiz")
     async def start_quiz(self, ctx, quiz_id: int):
@@ -77,11 +86,11 @@ class QuizPlayCog(commands.Cog):
     @app_commands.choices(mode=[
         app_commands.Choice(name="Regular", value="regular"),
         app_commands.Choice(name="Ephemeral", value="ephemeral"),
-        #app_commands.Choice(name="Direct Message", value="dm")
+        app_commands.Choice(name="Direct Message", value="dm")
     ])
     async def take_quiz(self, interaction: discord.Interaction, quiz_id: int, mode: str = "regular"):
         # Defer response to buy time for loading
-        await interaction.response.defer(ephemeral=(mode == "ephemeral"))
+        await interaction.response.defer(ephemeral=(mode == "ephemeral" or mode == "dm"))
 
         timer = 20
         
@@ -89,7 +98,7 @@ class QuizPlayCog(commands.Cog):
             # Check if the quiz exists
             quiz_result = await get_quiz_name(quiz_id)
             if not quiz_result:
-                await interaction.followup.send("That quiz doesn't exist. Use /list_quizzes to see available quizzes.", ephemeral=(mode == "ephemeral"))
+                await interaction.followup.send("That quiz doesn't exist. Use /list_quizzes to see available quizzes.", ephemeral=(mode == "ephemeral" or mode == "dm"))
                 return
                 
             quiz_name = quiz_result[0]
@@ -105,7 +114,7 @@ class QuizPlayCog(commands.Cog):
             
             # Handle different quiz modes
             if mode == "regular":
-                # Regular (public) quiz - Current implementation
+                # Regular (public) quiz
                 message = await interaction.followup.send(f"Loading quiz: {quiz_name}...")
                 
                 view = IndividualQuizView(
@@ -124,63 +133,52 @@ class QuizPlayCog(commands.Cog):
                 await view.show_question()
                 
             elif mode == "ephemeral":
-                # Ephemeral quiz - Only visible to the user
-                view = EphemeralQuizView(
+                logger.info(f"User {interaction.user.id} requested quiz {quiz_id} with {timer}s timer")
+                
+                # Validate timer
+                if timer < 5 or timer > 300:
+                    await interaction.followup.send(
+                        "Timer must be between 5 and 300 seconds.", 
+                        ephemeral=True
+                    )
+                    return
+                
+                # Add to queue and let the queue system handle the rest
+                await quiz_queue.add_request(
                     interaction.user.id,
                     interaction,
                     quiz_id,
                     timer,
-                    interaction.user.name
+                    interaction.user.display_name
                 )
-                
-                if not await view.initialize(quiz_id):
-                    await interaction.followup.send("Failed to load quiz questions.", ephemeral=True)
-                    return
-                
-                await view.show_question()
                 
             elif mode == "dm":
                 # DM quiz - Send in direct messages and report back to channel
-                # First check if we can send DMs to the user
-                try:
-                    # Send a confirmation message to the channel
-                    await interaction.followup.send(
-                        f"{interaction.user.mention} - Check your DMs for the quiz: **{quiz_name}**!"
-                    )
-                    
-                    # Create the DM quiz view
-                    view = DMQuizView(
-                        interaction.user.id,
-                        interaction.channel.id,  # Report results back to this channel
-                        interaction.user,
-                        self.bot,
-                        quiz_id,
-                        timer,
-                        interaction.user.name
-                    )
-                    
-                    if not await view.initialize(quiz_id):
-                        await interaction.followup.send(
-                            "Couldn't send you a DM. Please enable DMs from server members and try again.", 
-                            ephemeral=True
-                        )
-                        return
-                    
-                    await view.show_question()
-                    
-                except discord.Forbidden:
-                    await interaction.followup.send(
-                        "I couldn't send you a DM. Please enable DMs from server members and try again.",
-                        ephemeral=True
-                    )
+                # Validate input
+                if timer < 5 or timer > 120:
+                    await interaction.followup.send("Timer must be between 5 and 120 seconds.", ephemeral=True)
                     return
-            
-            logger.info(f"User {interaction.user.name} started {mode} quiz {quiz_id}")
-            
+                    
+                user_id = interaction.user.id
+                channel_id = interaction.channel_id
+                user = interaction.user
+                user_name = interaction.user.display_name
+                
+                try:
+                    # Add user to queue with the new method
+                    success, message = await self.queue.add_to_queue(
+                        user_id, channel_id, user, quiz_id, timer, user_name)
+                    
+                    await interaction.followup.send(message, ephemeral=True)
+                    
+                except Exception as e:
+                    logger.error(f"Error adding user to quiz queue: {e}")
+                    await interaction.followup.send("There was an error starting the quiz. Please try again later.", ephemeral=True)
+                    
         except Exception as e:
             logger.error(f"Error starting quiz: {e}")
-            await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=(mode == "ephemeral"))
-    
+            await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=(mode == "ephemeral" or mode == "dm"))
+        
     @app_commands.command(name="schedule_quiz", description="Schedule a quiz to start at a specific time")
     @app_commands.describe(
         quiz_id="The ID of the quiz to schedule",

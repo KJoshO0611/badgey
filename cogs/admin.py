@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import logging
+import asyncio
 from config import CONFIG
 from utils.helpers import has_required_role
 from utils.db_utilsv2 import delete_scores
@@ -89,6 +90,22 @@ class AdminCog(commands.Cog):
             await ctx.send("I don't have permission to send messages there.", delete_after=5)
         except discord.HTTPException:
             await ctx.send("Something went wrong while trying to send the message.", delete_after=5)
+
+    @commands.command(name="cleandm")
+    async def clean_dm(self, ctx, limit: int = 50):
+        """Deletes the bot's messages in DMs while handling rate limits."""
+        if ctx.guild is None:  # Ensure it runs only in DMs
+            deleted = 0
+            async for message in ctx.channel.history(limit=limit):
+                if message.author == self.bot.user:
+                    try:
+                        await message.delete()
+                        deleted += 1
+                        await asyncio.sleep(0.5)  # Prevent rate limits (2 deletes/sec)
+                    except discord.errors.HTTPException:
+                        await ctx.send("Rate limited! Try again later.", delete_after=5)
+                        break  # Stop execution if rate-limited
+            await ctx.send(f"Deleted {deleted} bot messages!", delete_after=5)
 
     @app_commands.command(name="convo")
     async def convo(self, interaction: discord.Interaction, message: str, avatar:str):
