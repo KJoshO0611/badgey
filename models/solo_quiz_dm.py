@@ -383,7 +383,7 @@ class DMQuizView:
                         )
                         
                         # Create a task to automatically end the quiz after timeout
-                        asyncio.create_task(self.auto_end_quiz(60))
+                        self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
                     else:
                         # Add Next Question button for non-last questions
                         next_view = discord.ui.View()
@@ -476,6 +476,14 @@ class DMQuizView:
                     value=f"The correct answer was {correct_answer}",
                     inline=False
                 )
+                
+                # Add explanation if available
+                if len(self.questions[self.current_index]) > 6 and self.questions[self.current_index][6]:  # Check if explanation exists
+                    embed.add_field(
+                        name="Explanation",
+                        value=self.questions[self.current_index][6],
+                        inline=False
+                    )
             
             # Check if this is the last question
             is_last_question = self.current_index == len(self.questions) - 1
@@ -517,7 +525,7 @@ class DMQuizView:
                 )
                 
                 # Create a task to automatically end the quiz after timeout
-                asyncio.create_task(self.auto_end_quiz(60))
+                self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
                 
             else:
                 # Add next button for non-last questions
@@ -578,9 +586,14 @@ class DMQuizView:
             if hasattr(self, '_quiz_ended') and self._quiz_ended:
                 logger.info(f"Quiz {self.quiz_instance_id} has already ended, ignoring duplicate end call")
                 return
-                
+            
             # Mark quiz as ended
             self._quiz_ended = True
+            
+            # Cancel any pending auto-end timer
+            if hasattr(self, '_auto_end_task') and self._auto_end_task:
+                self._auto_end_task.cancel()
+                self._auto_end_task = None
             
             logger.info(f"Ending quiz {self.quiz_instance_id} for user {self.user_id}")
             
@@ -685,6 +698,11 @@ class DMQuizView:
             # Wait for the specified timeout period
             await asyncio.sleep(timeout_seconds)
             
+            # Check if the quiz has already been ended manually
+            if hasattr(self, '_quiz_ended') and self._quiz_ended:
+                logger.info(f"Quiz {self.quiz_instance_id} was already manually ended, skipping auto-end")
+                return
+            
             # Check if we're still on the last question
             if self.current_index == len(self.questions) - 1:
                 logger.info(f"Auto-ending quiz for user {self.user_id} after {timeout_seconds} second timeout")
@@ -700,6 +718,10 @@ class DMQuizView:
                     
                 # Directly call end_quiz without any further conditions
                 await self.end_quiz()
+        except asyncio.CancelledError:
+            # Task was cancelled, just exit silently
+            logger.debug(f"Auto-end task was cancelled for quiz {self.quiz_instance_id}")
+            return
         except Exception as e:
             logger.error(f"Error in auto_end_quiz: {e}")
             # Try to force end the quiz even if there was an error

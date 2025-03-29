@@ -180,6 +180,7 @@ async def setup_db() -> None:
                     options JSON NOT NULL,
                     correct_answer TEXT NOT NULL,
                     score INT NOT NULL,
+                    explanation TEXT,
                     FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
                 )
             """)
@@ -215,7 +216,7 @@ async def get_quiz_questions(quiz_id) -> List[Tuple]:
     """
     try:
         query = """
-            SELECT question_id, quiz_id, question_text, options, correct_answer, score
+            SELECT question_id, quiz_id, question_text, options, correct_answer, score, explanation
             FROM questions
             WHERE quiz_id = %s
             Order by question_id ASC
@@ -231,7 +232,7 @@ async def get_question(question_id: int) -> Optional[Tuple]:
     """
     try:
         query = """
-            SELECT question_id, quiz_id, question_text, options, correct_answer, score
+            SELECT question_id, quiz_id, question_text, options, correct_answer, score, explanation
             FROM questions
             WHERE question_id = %s
         """
@@ -593,7 +594,7 @@ async def add_quiz(quiz_name: str, creator_id: str) -> int:
         return -1
 
 async def add_question(quiz_id: int, question_text: str, options: Union[dict, str],
-                       correct_answer: str, score: int) -> bool:
+                       correct_answer: str, score: int, explanation: str = None) -> bool:
     """
     Add a new question to the database
     
@@ -603,6 +604,7 @@ async def add_question(quiz_id: int, question_text: str, options: Union[dict, st
         options (dict or str): Question options as dictionary or JSON string
         correct_answer (str): Correct answer
         score (int): Question score
+        explanation (str, optional): Explanation for the correct answer
         
     Returns:
         bool: True if successful, False otherwise
@@ -615,10 +617,10 @@ async def add_question(quiz_id: int, question_text: str, options: Union[dict, st
             options_json = options  # Already a JSON string
             
         query = """
-            INSERT INTO questions (quiz_id, question_text, options, correct_answer, score)
-            VALUES (%s, %s, %s, %s, %s)
+            INSERT INTO questions (quiz_id, question_text, options, correct_answer, score, explanation)
+            VALUES (%s, %s, %s, %s, %s, %s)
         """
-        await execute_query(query, (quiz_id, question_text, options_json, correct_answer, score))
+        await execute_query(query, (quiz_id, question_text, options_json, correct_answer, score, explanation))
         return True
     except DatabaseQueryError as e:
         logger.error(f"Failed to add question: {str(e)}")
