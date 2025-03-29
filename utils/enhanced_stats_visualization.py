@@ -6,12 +6,14 @@ import cairo
 import math
 from datetime import datetime, timedelta
 import aiohttp
-import pygal
-from pygal.style import Style
-from pygal import Config
-import cairosvg
+import numpy as np
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend
+import matplotlib.pyplot as plt
+import seaborn as sns
 from PIL import Image, ImageDraw, ImageFont
 from io import BytesIO
+from scipy.interpolate import make_interp_spline
 
 # Enhanced color scheme with transparency for shadows
 COLORS = {
@@ -29,7 +31,7 @@ COLORS = {
     'grid': (0.2, 0.2, 0.2, 0.5)                   # Grid lines
 }
 
-# Pygal-friendly hex colors
+# Matplotlib/Seaborn-friendly hex colors
 HEX_COLORS = {
     'background': '#1e1e1e',
     'card_bg': '#2a2a2a',
@@ -39,11 +41,7 @@ HEX_COLORS = {
     'green': '#4CAF50',
     'magenta': '#E91E63',
     'dark_bg': '#181818',
-    'grid': '#333333',
-    'highlight': '#3a3a3a',
-    'purple': '#9B59B6',
-    'blue': '#3498DB',
-    'yellow': '#F1C40F'
+    'grid': '#333333'
 }
 
 # Layout constants
@@ -54,45 +52,6 @@ SHADOW_OFFSET = 4         # Shadow offset
 SHADOW_BLUR = 8           # Shadow blur radius
 BORDER_RADIUS = 12        # Default border radius
 SMALL_RADIUS = 6          # Smaller radius for inner elements
-
-# Custom Pygal style
-discord_style = Style(
-    background=HEX_COLORS['card_bg'],
-    plot_background=HEX_COLORS['card_bg'],
-    foreground=HEX_COLORS['text'],
-    foreground_strong=HEX_COLORS['text'],
-    foreground_subtle=HEX_COLORS['subtext'],
-    opacity='.9',
-    opacity_hover='.75',
-    transition='400ms ease-in',
-    colors=(HEX_COLORS['green'], HEX_COLORS['magenta'], HEX_COLORS['accent'], 
-            HEX_COLORS['purple'], HEX_COLORS['blue'], HEX_COLORS['yellow']),
-    value_font_size=12,
-    label_font_size=12,
-    title_font_size=16,
-    major_label_font_size=12,
-    value_label_font_size=12,
-    tooltip_font_size=14,
-    legend_font_size=12,
-    no_data_font_size=14
-)
-
-# Base config for all Pygal charts
-base_config = Config()
-base_config.show_legend = True
-base_config.legend_at_bottom = True
-base_config.legend_box_size = 14
-base_config.legend_font_size = 14
-base_config.tooltip_border_radius = 10
-base_config.tooltip_fancy_mode = True
-base_config.margin = 5
-base_config.style = discord_style
-base_config.show_x_guides = True
-base_config.show_y_guides = True
-base_config.y_labels_major_count = 5
-base_config.y_labels_major_every = 2
-base_config.show_minor_y_labels = True
-base_config.major_label_font_size = 14
 
 async def download_avatar(url, size=96):
     """Download a user's avatar"""
@@ -176,7 +135,7 @@ def draw_rounded_rect(ctx, x, y, width, height, radius=BORDER_RADIUS):
     ctx.close_path()
 
 def create_channels_chart(channels_data, width=400, height=150):
-    """Create a horizontal bar chart for top channels using Pygal"""
+    """Create a horizontal bar chart for top channels using Seaborn"""
     if not channels_data or len(channels_data) == 0:
         return create_fallback_chart("No channel data", width, height)
     
@@ -193,39 +152,49 @@ def create_channels_chart(channels_data, width=400, height=150):
             channels.append(channel)
             counts.append(count)
         
-        # Create horizontal bar chart
-        bar_chart = pygal.HorizontalBar(
-            width=width, 
-            height=height,
-            explicit_size=True,
-            style=discord_style,
-            show_legend=False,
-            margin=20,
-            # Add spacing between bars
-            margin_bottom=30,
-            spacing=8,
-            # Format tooltips
-            tooltip_fancy_mode=True
-        )
+        # Reverse the order for bottom-to-top plotting
+        channels.reverse()
+        counts.reverse()
         
-        # Set title and labels
-        bar_chart.title = 'Top Channels'
+        # Create figure
+        plt.figure(figsize=(width/100, height/100), dpi=100)
         
-        # Add data
-        for channel, count in zip(channels, counts):
-            bar_chart.add(f"#{channel}", [{'value': count, 'label': channel}])
+        # Set the style for dark theme
+        sns.set(style="darkgrid")
         
-        # Render to PNG
-        png_data = cairosvg.svg2png(
-            bytestring=bar_chart.render(),
-            background_color=HEX_COLORS['card_bg'],
-            scale=1.0,
-            output_width=width,
-            output_height=height
-        )
+        # Create the horizontal bar chart
+        ax = sns.barplot(x=counts, y=channels, palette="viridis")
         
-        # Return as BytesIO
-        buf = BytesIO(png_data)
+        # Set dark background
+        fig = plt.gcf()
+        fig.patch.set_facecolor(HEX_COLORS['card_bg'])
+        ax.set_facecolor(HEX_COLORS['card_bg'])
+        
+        # Format y-axis labels
+        ax.set_ylabel('')
+        for label in ax.get_yticklabels():
+            label.set_color(HEX_COLORS['text'])
+        
+        # Format x-axis labels
+        ax.set_xlabel('Messages')
+        ax.xaxis.label.set_color(HEX_COLORS['text'])
+        for label in ax.get_xticklabels():
+            label.set_color(HEX_COLORS['text'])
+        
+        # Add count labels to the bars
+        for i, count in enumerate(counts):
+            ax.text(count + max(counts) * 0.02, i, str(count), 
+                    va='center', color=HEX_COLORS['text'], fontweight='bold')
+        
+        # Adjust layout
+        plt.tight_layout()
+        
+        # Save to buffer
+        buf = BytesIO()
+        plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), transparent=False)
+        buf.seek(0)
+        plt.close(fig)  # Close the figure to free memory
+        
         return buf
         
     except Exception as e:
@@ -233,12 +202,16 @@ def create_channels_chart(channels_data, width=400, height=150):
         return create_fallback_chart("Chart generation failed", width, height)
 
 def create_activity_chart(message_data, voice_data, width=600, height=250):
-    """Create an activity chart using Pygal"""
+    """Create a beautiful activity chart using Seaborn with advanced styling"""
+    import threading
+    from functools import partial
+    
+    # Check if we have enough data
     if len(message_data) < 2 or len(voice_data) < 2:
         return create_fallback_chart("Insufficient data for chart", width, height)
     
+    # Extract data
     try:
-        # Extract data
         dates = [datetime.strptime(d, '%Y-%m-%d') for d in message_data.keys()]
         message_values = list(message_data.values())
         voice_values = list(voice_data.values())
@@ -249,123 +222,148 @@ def create_activity_chart(message_data, voice_data, width=600, height=250):
         message_values = message_values[:min_len]
         voice_values = voice_values[:min_len]
         
-        # Check if we have sufficient non-zero values
+        # Check if we have enough activity data
         if sum(message_values) < 2 and sum(voice_values) < 0.1:
-            return create_fallback_chart("Not enough activity data", width, height)
+            return create_fallback_chart("Not enough activity data to chart", width, height)
+    
+    except Exception as e:
+        print(f"Error processing chart data: {e}")
+        return create_fallback_chart(f"Data processing error", width, height)
+    
+    try:
+        # Set the Seaborn style
+        sns.set(style="darkgrid")
         
-        # Format dates as strings for x-axis labels
+        # Create figure with two y-axes
+        fig, ax1 = plt.subplots(figsize=(width/100, height/100), dpi=100)
+        
+        # Set dark background
+        fig.patch.set_facecolor(HEX_COLORS['card_bg'])
+        ax1.set_facecolor(HEX_COLORS['card_bg'])
+        
+        # Add light grid in background
+        ax1.grid(color=HEX_COLORS['grid'], linestyle='-', linewidth=0.5, alpha=0.7)
+        
+        # Create dates array for smoothing
+        dates_array = np.array([(d - min(dates)).days for d in dates])
+        
+        # Smooth the message data if we have enough points
+        if len(dates) > 5 and sum(message_values) > 0:
+            try:
+                # Use spline interpolation for smoother curves
+                x_smooth = np.linspace(dates_array.min(), dates_array.max(), 200)
+                message_smooth = make_interp_spline(dates_array, message_values)(x_smooth)
+                dates_smooth = min(dates) + pd.to_timedelta(x_smooth, unit='D')
+                
+                # Plot the smoothed message line
+                ax1.plot(dates_smooth, message_smooth, color=HEX_COLORS['green'], 
+                        linewidth=2.5, alpha=0.9)
+                
+                # Add light fill below the line
+                ax1.fill_between(dates_smooth, 0, message_smooth, 
+                                color=HEX_COLORS['green'], alpha=0.15)
+            except Exception as e:
+                print(f"Error smoothing message data: {e}")
+                # Fallback to regular line if smoothing fails
+                ax1.plot(dates, message_values, color=HEX_COLORS['green'], 
+                        linewidth=2.5, alpha=0.9)
+        else:
+            # Regular line for few data points
+            ax1.plot(dates, message_values, color=HEX_COLORS['green'], 
+                    linewidth=2.5, alpha=0.9, marker='o', markersize=4)
+        
+        # Configure y-axis for messages
+        ax1.set_ylabel('Messages', color=HEX_COLORS['green'], fontweight='bold')
+        ax1.tick_params(axis='y', labelcolor=HEX_COLORS['green'])
+        
+        # Create secondary y-axis for voice data
+        ax2 = ax1.twinx()
+        
+        # Smooth the voice data if we have enough points
+        if len(dates) > 5 and sum(voice_values) > 0:
+            try:
+                # Use spline interpolation for voice data
+                x_smooth = np.linspace(dates_array.min(), dates_array.max(), 200)
+                voice_smooth = make_interp_spline(dates_array, voice_values)(x_smooth)
+                dates_smooth = min(dates) + pd.to_timedelta(x_smooth, unit='D')
+                
+                # Plot the smoothed voice line
+                ax2.plot(dates_smooth, voice_smooth, color=HEX_COLORS['voice'], 
+                        linewidth=2.5, alpha=0.9)
+                
+                # Add light fill below the line
+                ax2.fill_between(dates_smooth, 0, voice_smooth, 
+                                color=HEX_COLORS['voice'], alpha=0.15)
+            except Exception as e:
+                print(f"Error smoothing voice data: {e}")
+                # Fallback to regular line
+                ax2.plot(dates, voice_values, color=HEX_COLORS['voice'], 
+                        linewidth=2.5, alpha=0.9)
+        else:
+            # Regular line for few data points
+            ax2.plot(dates, voice_values, color=HEX_COLORS['voice'], 
+                    linewidth=2.5, alpha=0.9, marker='o', markersize=4)
+                    
+        # Configure y-axis for voice hours
+        ax2.set_ylabel('Voice Hours', color=HEX_COLORS['voice'], fontweight='bold')
+        ax2.tick_params(axis='y', labelcolor=HEX_COLORS['voice'])
+        
+        # Determine date formatting based on date range
         date_range = (max(dates) - min(dates)).days if dates else 0
         
-        # Decide on date format based on range
+        # Format x-axis based on date range
         if date_range > 180:  # > 6 months
+            ax1.xaxis.set_major_locator(plt.matplotlib.dates.MonthLocator())
             date_format = '%b'  # Month abbreviated name
-            x_labels_major_count = 6
         elif date_range > 60:  # 2-6 months
+            ax1.xaxis.set_major_locator(plt.matplotlib.dates.WeekdayLocator(interval=2))
             date_format = '%b %d'  # Month and day
-            x_labels_major_count = 8
         elif date_range > 30:  # 1-2 months
+            ax1.xaxis.set_major_locator(plt.matplotlib.dates.WeekdayLocator())
             date_format = '%b %d'  # Month and day
-            x_labels_major_count = 10
         else:  # < 1 month
-            date_format = '%d'  # Day only
-            x_labels_major_count = min(14, date_range)
+            ax1.xaxis.set_major_locator(plt.matplotlib.dates.DayLocator(interval=max(1, date_range//10 or 1)))
+            date_format = '%d'  # Day of month
         
-        # Format dates for labels
-        formatted_dates = [d.strftime(date_format) for d in dates]
+        # Format dates
+        date_formatter = plt.matplotlib.dates.DateFormatter(date_format)
+        ax1.xaxis.set_major_formatter(date_formatter)
+        plt.xticks(rotation=30)
         
-        # Create line chart with dual y-axis
-        line_chart = pygal.Line(
-            width=width, 
-            height=height,
-            explicit_size=True,
-            style=discord_style,
-            margin=20,
-            margin_bottom=30,
-            margin_top=30,
-            x_labels_major_count=x_labels_major_count,
-            show_minor_x_labels=False,
-            legend_at_bottom=True,
-            legend_box_size=15,
-            stroke_style={'width': 3, 'linecap': 'round', 'linejoin': 'round'},
-            dots_size=4,
-            tooltip_border_radius=10
+        # Set text colors for a dark theme
+        for label in ax1.get_xticklabels():
+            label.set_color(HEX_COLORS['text'])
+        
+        # Add legend with custom handles
+        legend = fig.legend(
+            ['Messages', 'Voice Hours'], 
+            loc='upper center', 
+            bbox_to_anchor=(0.5, 1.05), 
+            ncol=2, 
+            fancybox=True, 
+            shadow=True,
+            framealpha=0.8
         )
         
-        # Set title and labels
-        line_chart.title = 'Activity Over Time'
-        line_chart.x_labels = formatted_dates
+        # Set legend text color
+        for text in legend.get_texts():
+            text.set_color(HEX_COLORS['text'])
         
-        # Add data
-        line_chart.add('Messages', message_values, stroke_style={'width': 3})
+        # Adjust layout and margins
+        plt.tight_layout()
         
-        # Use a secondary y-axis for voice hours
-        line_chart.add('Voice Hours', voice_values, secondary=True, stroke_style={'width': 3, 'dasharray': '5, 3'})
+        # Convert to image
+        buf = BytesIO()
+        plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), transparent=False, bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)  # Close the figure to free memory
         
-        # Render to PNG 
-        png_data = cairosvg.svg2png(
-            bytestring=line_chart.render(),
-            background_color=HEX_COLORS['card_bg'],
-            scale=1.0,
-            output_width=width,
-            output_height=height
-        )
-        
-        # Return as BytesIO
-        buf = BytesIO(png_data)
         return buf
         
     except Exception as e:
-        print(f"Error generating activity chart: {e}")
+        print(f"Error generating Seaborn chart: {e}")
         return create_fallback_chart("Chart generation failed", width, height)
-
-def create_fallback_chart(message, width, height):
-    """Create a simple fallback chart when main chart generation fails"""
-    from io import BytesIO
-    import cairo
     
-    # Create surface
-    surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, width, height)
-    ctx = cairo.Context(surface)
-    
-    # Fill background with card background color
-    ctx.set_source_rgba(*COLORS['card_bg'])
-    ctx.rectangle(0, 0, width, height)
-    ctx.fill()
-    
-    # Add message
-    ctx.select_font_face("Arial", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-    ctx.set_font_size(16)
-    ctx.set_source_rgba(*COLORS['text'])
-    
-    # Calculate text position
-    x_bearing, y_bearing, text_width, text_height = ctx.text_extents(message)[:4]
-    x = (width - text_width) / 2
-    y = (height + text_height) / 2
-    
-    # Draw text
-    ctx.move_to(x, y)
-    ctx.show_text(message)
-    
-    # Draw placeholder chart elements
-    ctx.set_source_rgba(*COLORS['grid'])
-    
-    # X-axis
-    ctx.move_to(width * 0.1, height * 0.8)
-    ctx.line_to(width * 0.9, height * 0.8)
-    ctx.stroke()
-    
-    # Y-axis
-    ctx.move_to(width * 0.1, height * 0.2)
-    ctx.line_to(width * 0.1, height * 0.8)
-    ctx.stroke()
-    
-    # Convert to bytes
-    buf = BytesIO()
-    surface.write_to_png(buf)
-    buf.seek(0)
-    
-    return buf
-
 async def generate_cairo_stats(user, guild, stats_data, width=1200, height=600):
     """Generate a beautiful stats image using Cairo with Pygal charts"""
     # Create image surface
@@ -721,5 +719,46 @@ async def generate_cairo_stats(user, guild, stats_data, width=1200, height=600):
     buf = BytesIO()
     surface.write_to_png(buf)
     buf.seek(0)
+    
+    return buf
+
+def create_fallback_chart(message, width, height):
+    """Create a simple fallback chart when the main chart generation fails"""
+    plt.figure(figsize=(width/100, height/100), dpi=100)
+    ax = plt.gca()
+    
+    # Set background color
+    fig = plt.gcf()
+    fig.patch.set_facecolor(COLORS['background'])
+    ax.set_facecolor(COLORS['background'])
+    
+    # Add message
+    plt.text(0.5, 0.5, message, 
+             horizontalalignment='center',
+             verticalalignment='center',
+             fontsize=12,
+             color=COLORS['text'],
+             transform=ax.transAxes)
+    
+    # Remove axis ticks and labels
+    plt.xticks([])
+    plt.yticks([])
+    
+    # Add placeholder grid
+    ax.grid(False)
+    
+    # Add placeholder axes
+    ax.axhline(y=0.8, xmin=0.1, xmax=0.9, color=COLORS['grid'], linewidth=1)
+    ax.axvline(x=0.1, ymin=0.2, ymax=0.8, color=COLORS['grid'], linewidth=1)
+    
+    # Remove spines
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    
+    # Convert to bytes
+    buf = BytesIO()
+    plt.savefig(buf, format='png', facecolor=fig.get_facecolor(), bbox_inches='tight')
+    buf.seek(0)
+    plt.close(fig)
     
     return buf
