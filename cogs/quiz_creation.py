@@ -5,7 +5,6 @@ import logging
 from typing import Optional, List
 import json
 from config import CONFIG
-from models.quiz_view import QuizView, QuizCreationView
 from utils.helpers import has_required_role, parse_options
 from utils.db_utilsv2 import (
     get_question,
@@ -17,7 +16,8 @@ from utils.db_utilsv2 import (
     get_quiz_name,
     get_leaderboards,
     check_quiz_exists,
-    delete_quiz
+    delete_quiz,
+    add_quiz
 )
 
 logger = logging.getLogger('badgey.quiz_commands')
@@ -38,12 +38,28 @@ class QuizCommandsCog(commands.Cog):
             return
 
         try:
-            view = QuizCreationView(interaction)
-            await interaction.response.send_message("Let's create a quiz!", view=view, ephemeral=True)
-            logger.info(f"Quiz creation started by {interaction.user.name}")
+            # Replace QuizCreationView with direct message-based creation
+            await interaction.response.send_message("Let's create a quiz! Please enter the name of your quiz:", ephemeral=True)
+            
+            # Wait for quiz name
+            quiz_name_message = await self.bot.wait_for(
+                "message",
+                check=lambda m: m.author == interaction.user,
+                timeout=60.0
+            )
+            
+            # Create quiz in database
+            quiz_id = await add_quiz(quiz_name_message.content, interaction.user.id)
+            
+            await interaction.followup.send(
+                f"Quiz '{quiz_name_message.content}' created with ID: {quiz_id}! Use `/add_question {quiz_id} [question details]` to add questions.",
+                ephemeral=True
+            )
+            
+            logger.info(f"Quiz creation completed by {interaction.user.name}: {quiz_name_message.content} (ID: {quiz_id})")
         except Exception as e:
             logger.error(f"Error in create_quiz: {e}")
-            await interaction.response.send_message(f"Oops! Something went wrong: {e}", ephemeral=True)
+            await interaction.followup.send(f"Oops! Something went wrong: {e}", ephemeral=True)
 
     #Delete Quiz and Questions
     @app_commands.command(name="delete_quiz", description="Deletes a quiz")

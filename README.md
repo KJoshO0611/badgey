@@ -28,6 +28,7 @@ A feature-rich Discord bot focused on quiz functionality for server engagement.
 - `/list_questions` - Show questions on a specific quiz
 - `/leaderboard` - Show top users by quiz score
 - `/delete_quiz` - Delete a quiz and its questions
+- `/schedule_quiz` - Schedule a quiz to start at a specific time
 
 ## License
 

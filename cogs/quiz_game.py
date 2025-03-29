@@ -4,7 +4,6 @@ from discord import app_commands
 import logging
 from config import CONFIG
 from datetime import datetime, timedelta
-from models.quiz_view import QuizView
 from models.solo_quiz import IndividualQuizView
 from models.solo_quiz_ephemeral import EphemeralQuizView
 from models.solo_quiz_dm import DMQuizView
@@ -27,72 +26,19 @@ class QuizPlayCog(commands.Cog):
         self.bot.loop.create_task(self.queue.process_queue(self.bot))
         logger.info("Quiz queue processor started")
         
-    @commands.command(name="start_quiz")
-    async def start_quiz(self, ctx, quiz_id: int):
-        """Start a quiz (Traditional command)"""
-        if not has_required_role(ctx.author, CONFIG['REQUIRED_ROLES']):
-            await ctx.send("Uh-oh! You don't have permission to use this command! Guess someone's not in charge here! Hehehe!", delete_after=5)
-            return
-        
-        # Send an initial message to create a message object we can edit later
-        message = await ctx.send("Loading quiz...")
-        
-        # Create the view with the message instead of ctx
-        view = QuizView(message, quiz_id)
-        await view.initialize(message, quiz_id)
-        
-        # Check if questions loaded successfully
-        if not hasattr(view, 'questions') or not view.questions:
-            await message.edit(content="No questions found for this quiz.")
-            return
-            
-        # Update the view's message reference
-        view.message = message
-        
-        # Start showing questions
-        await view.show_question()
-    
-    # Slash command version of start_quiz
-    @app_commands.command(name="start_quiz", description="Start a quiz")
-    @app_commands.describe(quiz_id="The ID of the quiz to start")
-    async def slash_start_quiz(self, interaction: discord.Interaction, quiz_id: int, timer: int):
-        if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']):
-            await interaction.response.send_message("Uh-oh! You don't have permission to use this command! Guess someone's not in charge here! Hehehe!", ephemeral=True)
-            return
-        
-        # Defer response to buy time for loading
-        await interaction.response.defer()
-        
-        # Create initial response
-        message = await interaction.followup.send("Loading quiz...")
-        
-        # Create the view with the message
-        view = QuizView(message, quiz_id, timer)
-        await view.initialize(message, quiz_id)
-        
-        # Check if questions loaded successfully
-        if not hasattr(view, 'questions') or not view.questions:
-            await message.edit(content="No questions found for this quiz.")
-            return
-            
-        view.message = message
-        await view.show_question()
-
     @app_commands.command(name="take_quiz", description="Take a quiz individually")
     @app_commands.describe(
         quiz_id="The ID of the quiz to take",
-        mode="Quiz mode: regular, ephemeral, or dm"
+        mode="Quiz mode: ephemeral or dm",
+        timer="Time in seconds for each question (default: 20)"
     )
     @app_commands.choices(mode=[
-        #app_commands.Choice(name="Regular", value="regular"),
         app_commands.Choice(name="Ephemeral", value="ephemeral"),
         app_commands.Choice(name="Direct Message", value="dm")
     ])
-    async def take_quiz(self, interaction: discord.Interaction, quiz_id: int, mode: str = "ephemeral"):
+    async def take_quiz(self, interaction: discord.Interaction, quiz_id: int, mode: str = "ephemeral", timer: int = 20):
         # Defer response to buy time for loading
         await interaction.response.defer(ephemeral=(mode == "ephemeral" or mode == "dm"))
-
-        timer = 20
         
         try:
             # Check if the quiz exists
@@ -112,26 +58,6 @@ class QuizPlayCog(commands.Cog):
                 )
                 return
             
-           ## # Handle different quiz modes
-            #if mode == "regular":
-                # Regular (public) quiz
-            #    message = await interaction.followup.send(f"Loading quiz: {quiz_name}...")
-                
-            #    view = IndividualQuizView(
-            #        interaction.user.id, 
-            #        message, 
-            #        quiz_id, 
-            #        timer, 
-            #        interaction.user.name
-            #    )
-            #    await view.initialize(message, quiz_id)
-                
-            #    if not hasattr(view, 'questions') or not view.questions:
-            #        await message.edit(content="No questions found for this quiz.")
-            #        return
-                    
-            #    await view.show_question()
-                
             if mode == "ephemeral":
                 logger.info(f"User {interaction.user.id} requested quiz {quiz_id} with {timer}s timer")
                 
@@ -150,7 +76,7 @@ class QuizPlayCog(commands.Cog):
                     quiz_id,
                     timer,
                     interaction.user.display_name
-                )##
+                )
                 
             elif mode == "dm":
                 # DM quiz - Send in direct messages and report back to channel
