@@ -16,43 +16,81 @@ class DatabaseQueryError(Exception):
     """Exception raised when a database query fails"""
     pass
 
+# Connection pool global variable
+pool = None
+
 # Configurable retry parameters
 MAX_RETRIES = 3
 RETRY_DELAY = 1  # seconds
 RETRY_BACKOFF_FACTOR = 2  # exponential backoff
 
-async def get_db_connection() -> aiomysql.Connection:
+async def initialize_pool() -> None:
     """
-    Establish a database connection with retry logic.
+    Initialize the database connection pool.
     
-    Returns:
-        aiomysql.Connection: A database connection
-        
     Raises:
-        DatabaseConnectionError: If all connection attempts fail
+        DatabaseConnectionError: If pool initialization fails
     """
+    global pool
+    
     for attempt in range(MAX_RETRIES):
         try:
-            conn = await aiomysql.connect(
+            pool = await aiomysql.create_pool(
                 host=CONFIG['DB']['HOST'],
                 port=CONFIG['DB']['PORT'],
                 user=CONFIG['DB']['USER'],
                 password=CONFIG['DB']['PASSWORD'],
                 db=CONFIG['DB']['DATABASE'],
+                minsize=5,
+                maxsize=15,
                 autocommit=True,
-                #connect_timeout=10,
-                #pool_recycle=300,
-                #maxsize=15  # Adjust based on your needs
+                pool_recycle=300
             )
-            return conn
+            logger.info("Database connection pool initialized successfully")
+            return
         except Exception as e:
             delay = RETRY_DELAY * (RETRY_BACKOFF_FACTOR ** attempt)
-            logger.warning(f"Database connection attempt {attempt+1}/{MAX_RETRIES} failed: {str(e)}. Retrying in {delay}s")
+            logger.warning(f"Pool initialization attempt {attempt+1}/{MAX_RETRIES} failed: {str(e)}. Retrying in {delay}s")
             await asyncio.sleep(delay)
-    
+
     # If we get here, all retries failed
-    logger.error(f"All database connection attempts failed")
-    raise DatabaseConnectionError("Failed to connect to database after multiple attempts")
+    logger.error("All pool initialization attempts failed")
+    raise DatabaseConnectionError("Failed to initialize database pool after multiple attempts")
+
+async def get_db_connection() -> aiomysql.Connection:
+    """
+    Get a connection from the pool.
+    
+    Returns:
+        aiomysql.Connection: A database connection
+        
+    Raises:
+        DatabaseConnectionError: If connection cannot be acquired
+    """
+    global pool
+    
+    # Initialize pool if it doesn't exist
+    if pool is None or pool.closed:
+        await initialize_pool()
+    
+    try:
+        # Acquire connection from pool
+        conn = await pool.acquire()
+        return conn
+    except Exception as e:
+        logger.error(f"Failed to acquire connection from pool: {str(e)}")
+        raise DatabaseConnectionError(f"Failed to acquire connection from pool: {str(e)}")
+
+async def release_connection(conn: aiomysql.Connection) -> None:
+    """
+    Release a connection back to the pool.
+    
+    Args:
+        conn (aiomysql.Connection): Connection to release
+    """
+    global pool
+    if pool is not None and not pool.closed and conn is not None:
+        pool.release(conn)
 
 async def execute_query(query: str, params: Tuple = None, retries: int = MAX_RETRIES) -> None:
     """
@@ -79,7 +117,7 @@ async def execute_query(query: str, params: Tuple = None, retries: int = MAX_RET
             await asyncio.sleep(delay)
         finally:
             if conn:
-                conn.close()
+                await release_connection(conn)
     
     logger.error(f"All query execution attempts failed for query: {query}")
     raise DatabaseQueryError(f"Failed to execute query after {retries} attempts")
@@ -113,7 +151,7 @@ async def fetch_one(query: str, params: Tuple = None, retries: int = MAX_RETRIES
             await asyncio.sleep(delay)
         finally:
             if conn:
-                conn.close()
+                await release_connection(conn)
     
     logger.error(f"All fetch attempts failed for query: {query}")
     raise DatabaseQueryError(f"Failed to fetch data after {retries} attempts")
@@ -147,58 +185,65 @@ async def fetch_all(query: str, params: Tuple = None, retries: int = MAX_RETRIES
             await asyncio.sleep(delay)
         finally:
             if conn:
-                conn.close()
+                await release_connection(conn)
     
     logger.error(f"All fetch all attempts failed for query: {query}")
     raise DatabaseQueryError(f"Failed to fetch all data after {retries} attempts")
 
 async def setup_db() -> None:
     """
-    Initialize database connection and create necessary tables
+    Initialize database connection pool and create necessary tables
     
     Raises:
         DatabaseConnectionError: If database connection fails
     """
     try:
+        # Initialize connection pool
+        await initialize_pool()
+        
         conn = await get_db_connection()
-        async with conn.cursor() as cursor:
-            # Create tables if they don't exist
-            await cursor.execute("""
-                CREATE TABLE IF NOT EXISTS quizzes (
-                    quiz_id INT AUTO_INCREMENT PRIMARY KEY,
-                    quiz_name TEXT NOT NULL,
-                    creator_id BIGINT NOT NULL,
-                    creation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            """)
+        try:
+            async with conn.cursor() as cursor:
+                # Create tables if they don't exist
+                await cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS quizzes (
+                        quiz_id INT AUTO_INCREMENT PRIMARY KEY,
+                        quiz_name TEXT NOT NULL,
+                        creator_id BIGINT NOT NULL,
+                        creation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
 
-            await cursor.execute("""
-                CREATE TABLE IF NOT EXISTS questions (
-                    question_id INT AUTO_INCREMENT PRIMARY KEY,
-                    quiz_id INT NOT NULL,
-                    question_text TEXT NOT NULL,
-                    options JSON NOT NULL,
-                    correct_answer TEXT NOT NULL,
-                    score INT NOT NULL,
-                    explanation TEXT,
-                    FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
-                )
-            """)
+                await cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS questions (
+                        question_id INT AUTO_INCREMENT PRIMARY KEY,
+                        quiz_id INT NOT NULL,
+                        question_text TEXT NOT NULL,
+                        options JSON NOT NULL,
+                        correct_answer TEXT NOT NULL,
+                        score INT NOT NULL,
+                        explanation TEXT,
+                        FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
+                    )
+                """)
 
-            await cursor.execute("""
-                CREATE TABLE IF NOT EXISTS user_scores (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    user_id BIGINT NOT NULL,
-                    user_name VARCHAR(255) NOT NULL,
-                    quiz_id INT NOT NULL,
-                    score INT NOT NULL,
-                    completion_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE KEY unique_user_quiz (user_id, quiz_id),
-                    FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
-                )
-            """)
-        logger.info("Database setup completed successfully")
-        conn.close()
+                await cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS user_scores (
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        user_name VARCHAR(255) NOT NULL,
+                        quiz_id INT NOT NULL,
+                        score INT NOT NULL,
+                        completion_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE KEY unique_user_quiz (user_id, quiz_id),
+                        INDEX idx_quiz_id (quiz_id),
+                        FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
+                    )
+                """)
+            logger.info("Database setup completed successfully")
+        finally:
+            if conn:
+                await release_connection(conn)
     except Exception as e:
         logger.error(f"Failed to setup database: {str(e)}")
         raise DatabaseConnectionError(f"Failed to setup database: {str(e)}")
@@ -258,14 +303,20 @@ async def get_quiz_name(quiz_id: int) -> Optional[Tuple[str]]:
         logger.error(f"Error fetching quiz name for quiz {quiz_id}: {str(e)}")
         return None
 
-async def get_quiz_scores(quiz_id) -> List[Tuple]:
+async def get_quiz_scores(quiz_id: int) -> List[Tuple]:
     """
     Get all scores for a specific quiz
+    
+    Args:
+        quiz_id (int): ID of the quiz
+        
+    Returns:
+        List[Tuple]: List of score data (empty list if no scores or on error)
     """
     try:
         query = """
             SELECT user_id, user_name, quiz_id, score
-            FROM scores
+            FROM user_scores
             WHERE quiz_id = %s
             ORDER BY score DESC
         """
@@ -274,14 +325,21 @@ async def get_quiz_scores(quiz_id) -> List[Tuple]:
         logger.error(f"Failed to get quiz scores: {str(e)}")
         return []
     
-async def get_user_score(user_id, quiz_id) -> Optional[Tuple]:
+async def get_user_score(user_id: int, quiz_id: int) -> Optional[Tuple]:
     """
     Get a user's score for a specific quiz
+    
+    Args:
+        user_id (int): ID of the user
+        quiz_id (int): ID of the quiz
+        
+    Returns:
+        Optional[Tuple]: Score data or None if not found or on error
     """
     try:
         query = """
             SELECT user_id, quiz_id, score
-            FROM scores
+            FROM user_scores
             WHERE user_id = %s AND quiz_id = %s
         """
         return await fetch_one(query, (user_id, quiz_id))
@@ -289,14 +347,20 @@ async def get_user_score(user_id, quiz_id) -> Optional[Tuple]:
         logger.error(f"Failed to get user score: {str(e)}")
         return None
 
-async def get_user_scores(user_id) -> List[Tuple]:
+async def get_user_scores(user_id: int) -> List[Tuple]:
     """
     Get all scores for a specific user
+    
+    Args:
+        user_id (int): ID of the user
+        
+    Returns:
+        List[Tuple]: List of score data (empty list if no scores or on error)
     """
     try:
         query = """
             SELECT user_id, quiz_id, score
-            FROM scores
+            FROM user_scores
             WHERE user_id = %s
             ORDER BY score DESC
         """
@@ -305,14 +369,21 @@ async def get_user_scores(user_id) -> List[Tuple]:
         logger.error(f"Failed to get user scores: {str(e)}")
         return []
 
-async def get_user_scores_by_quiz_name(user_id, quiz_name) -> List[Tuple]:
+async def get_user_scores_by_quiz_name(user_id: int, quiz_name: str) -> List[Tuple]:
     """
     Get all scores for a specific user on a specific quiz
+    
+    Args:
+        user_id (int): ID of the user
+        quiz_name (str): Name of the quiz
+        
+    Returns:
+        List[Tuple]: List of score data (empty list if no scores or on error)
     """
     try:
         query = """
             SELECT user_id, quiz_id, score
-            FROM scores
+            FROM user_scores
             WHERE user_id = %s AND quiz_id = (SELECT quiz_id FROM quizzes WHERE quiz_name = %s)
         """
         return await fetch_all(query, (user_id, quiz_name))
@@ -523,20 +594,38 @@ async def record_user_score(user_id: int, username: str, quiz_id: int, score: in
     Returns:
         bool: True if successful, False otherwise
     """
+    # Validate inputs
+    if not isinstance(user_id, int) or user_id <= 0:
+        logger.error(f"Invalid user_id: {user_id}")
+        return False
+        
+    if not isinstance(quiz_id, int) or quiz_id <= 0:
+        logger.error(f"Invalid quiz_id: {quiz_id}")
+        return False
+        
+    if not isinstance(score, int):
+        logger.error(f"Invalid score: {score}")
+        return False
+        
     try:
         # Check if the user already has a score for this quiz
-        check_query = "SELECT user_id FROM user_scores WHERE user_id = %s AND quiz_id = %s"
-        existing_score = await fetch_one(check_query, (user_id, quiz_id))
+        check_query = "SELECT score FROM user_scores WHERE user_id = %s AND quiz_id = %s"
+        existing_score_result = await fetch_one(check_query, (user_id, quiz_id))
         
-        if existing_score:
-            # Update existing score if it's higher
-            update_query = """
-                UPDATE user_scores 
-                SET score = GREATEST(score, %s), 
-                    completion_date = NOW() 
-                WHERE user_id = %s AND quiz_id = %s
-            """
-            await execute_query(update_query, (score, user_id, quiz_id))
+        if existing_score_result:
+            existing_score = existing_score_result[0]
+            # Only update if new score is higher
+            if score > existing_score:
+                update_query = """
+                    UPDATE user_scores 
+                    SET score = %s, 
+                        completion_date = NOW() 
+                    WHERE user_id = %s AND quiz_id = %s
+                """
+                await execute_query(update_query, (score, user_id, quiz_id))
+                logger.info(f"Updated score from {existing_score} to {score} for user {username} (ID: {user_id}) on quiz {quiz_id}")
+            else:
+                logger.info(f"Kept existing higher score {existing_score} for user {username} (ID: {user_id}) on quiz {quiz_id}")
         else:
             # Insert new score
             insert_query = """
@@ -544,54 +633,88 @@ async def record_user_score(user_id: int, username: str, quiz_id: int, score: in
                 VALUES (%s, %s, %s, %s, NOW())
             """
             await execute_query(insert_query, (user_id, username, quiz_id, score))
+            logger.info(f"Recorded new score {score} for user {username} (ID: {user_id}) on quiz {quiz_id}")
         
-        logger.info(f"Successfully recorded score {score} for user {username} (ID: {user_id}) on quiz {quiz_id}")
         return True
     except (DatabaseConnectionError, DatabaseQueryError) as e:
         logger.error(f"Failed to record score for user {username} (ID: {user_id}) on quiz {quiz_id}: {str(e)}")
         return False
 
-async def add_quiz(quiz_name: str, creator_id: str) -> int:
+async def add_quiz(quiz_name: str, creator_id: str) -> Optional[int]:
     """
     Add a new quiz to the database
+    
+    Args:
+        quiz_name (str): Name of the quiz
+        creator_id (str): ID of the creator
+        
+    Returns:
+        Optional[int]: Quiz ID if successful, None on failure
     """
+    # Validate inputs
+    if not quiz_name or not quiz_name.strip():
+        logger.error("Quiz name cannot be empty")
+        return None
+        
+    conn = None
     try:
-        # First check if a similar quiz already exists
-        check_query = "SELECT quiz_id FROM quizzes WHERE quiz_name = %s AND creator_id = %s ORDER BY quiz_id DESC LIMIT 1"
-        existing = await fetch_one(check_query, (quiz_name,creator_id,))
-        if existing:
-            logger.info(f"Quiz '{quiz_name}' already exists with ID {existing[0]}")
-            return existing[0]
+        # Perform this as a transaction
+        conn = await get_db_connection()
         
-        # Insert the new quiz
-        query = "INSERT INTO quizzes (quiz_name,creator_id) VALUES (%s,%s)"
-        result = await execute_query(query, (quiz_name,creator_id,))
+        # Disable autocommit to start a transaction
+        async with conn.cursor() as cursor:
+            await cursor.execute("SET autocommit = 0")
         
-        # Check if row was inserted
-        if hasattr(result, 'rowcount') and result.rowcount > 0:
-            logger.info(f"Quiz '{quiz_name}' inserted successfully")
-        else:
-            logger.warning(f"Quiz '{quiz_name}' insert reported no rows affected")
-        
-        # Get the new quiz ID
-        quiz_id_query = "SELECT LAST_INSERT_ID()"
-        result = await fetch_one(quiz_id_query)
-        
-        id_value = result[0] if result else -1
-        logger.info(f"LAST_INSERT_ID() returned: {id_value}")
-        
-        if id_value <= 0:
-            # Try alternative approach
-            alternative_query = "SELECT quiz_id FROM quizzes WHERE quiz_name = %s AND creator_id = %s ORDER BY quiz_id DESC LIMIT 1"
-            alt_result = await fetch_one(alternative_query, (quiz_name,creator_id,))
-            if alt_result:
-                logger.info(f"Alternative query found ID: {alt_result[0]}")
-                return alt_result[0]
-                
-        return id_value
-    except DatabaseQueryError as e:
+            # First check if a similar quiz already exists
+            await cursor.execute(
+                "SELECT quiz_id FROM quizzes WHERE quiz_name = %s AND creator_id = %s ORDER BY quiz_id DESC LIMIT 1",
+                (quiz_name, creator_id)
+            )
+            existing = await cursor.fetchone()
+            
+            if existing:
+                # Commit the transaction and return existing ID
+                await cursor.execute("COMMIT")
+                logger.info(f"Quiz '{quiz_name}' already exists with ID {existing[0]}")
+                return existing[0]
+            
+            # Insert the new quiz
+            await cursor.execute(
+                "INSERT INTO quizzes (quiz_name, creator_id) VALUES (%s, %s)",
+                (quiz_name, creator_id)
+            )
+            
+            # Get the new quiz ID
+            await cursor.execute("SELECT LAST_INSERT_ID()")
+            result = await cursor.fetchone()
+            quiz_id = result[0] if result else None
+            
+            # Commit the transaction
+            await cursor.execute("COMMIT")
+            
+            logger.info(f"Quiz '{quiz_name}' inserted successfully with ID {quiz_id}")
+            return quiz_id
+            
+    except Exception as e:
         logger.error(f"Failed to add quiz: {str(e)}")
-        return -1
+        # Rollback on error
+        if conn:
+            try:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("ROLLBACK")
+            except Exception as rollback_error:
+                logger.error(f"Failed to rollback transaction: {str(rollback_error)}")
+        return None
+        
+    finally:
+        # Re-enable autocommit and release connection
+        if conn:
+            try:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SET autocommit = 1")
+            except Exception as autocommit_error:
+                logger.error(f"Failed to reset autocommit: {str(autocommit_error)}")
+            await release_connection(conn)
 
 async def add_question(quiz_id: int, question_text: str, options: Union[dict, str],
                        correct_answer: str, score: int, explanation: str = None) -> bool:
@@ -609,18 +732,58 @@ async def add_question(quiz_id: int, question_text: str, options: Union[dict, st
     Returns:
         bool: True if successful, False otherwise
     """
+    # Validate inputs
+    if not isinstance(quiz_id, int) or quiz_id <= 0:
+        logger.error(f"Invalid quiz_id: {quiz_id}")
+        return False
+        
+    if not question_text or not question_text.strip():
+        logger.error("Question text cannot be empty")
+        return False
+        
+    if not correct_answer or not correct_answer.strip():
+        logger.error("Correct answer cannot be empty")
+        return False
+        
+    if not isinstance(score, int) or score < 0:
+        logger.error(f"Invalid score value: {score}")
+        return False
+    
     try:
-        # Check if options is already a JSON string
+        # Validate and convert options if needed
+        options_json = None
         if isinstance(options, dict):
+            if not options:
+                logger.error("Options dictionary cannot be empty")
+                return False
             options_json = json.dumps(options)
+        elif isinstance(options, str):
+            try:
+                # Check if it's valid JSON
+                parsed = json.loads(options)
+                if not parsed:
+                    logger.error("Options JSON cannot be empty")
+                    return False
+                options_json = options
+            except json.JSONDecodeError:
+                logger.error("Invalid JSON string for options")
+                return False
         else:
-            options_json = options  # Already a JSON string
+            logger.error(f"Invalid options type: {type(options)}")
+            return False
+            
+        # Check if correct_answer is in options
+        options_dict = json.loads(options_json) if isinstance(options_json, str) else options
+        if correct_answer not in options_dict:
+            logger.error(f"Correct answer '{correct_answer}' not found in options")
+            return False
             
         query = """
             INSERT INTO questions (quiz_id, question_text, options, correct_answer, score, explanation)
             VALUES (%s, %s, %s, %s, %s, %s)
         """
         await execute_query(query, (quiz_id, question_text, options_json, correct_answer, score, explanation))
+        logger.info(f"Added question to quiz {quiz_id}: {question_text[:30]}...")
         return True
     except DatabaseQueryError as e:
         logger.error(f"Failed to add question: {str(e)}")
@@ -657,36 +820,46 @@ async def delete_scores(user_id: Optional[str] = None, quiz_id: Optional[str] = 
         
     Returns:
         int: Number of rows affected or -1 if operation failed
-        
-    Raises:
-        DatabaseQueryError: If query execution fails
     """
+    conn = None
     try:
         query = "DELETE FROM user_scores WHERE 1=1"
         params = []
         
         # Add user filter if specified
         if user_id and user_id.lower() != "all":
-            query += " AND user_id = %s"
-            params.append(int(user_id))
+            try:
+                user_id_int = int(user_id)
+                query += " AND user_id = %s"
+                params.append(user_id_int)
+            except ValueError:
+                logger.error(f"Invalid user_id: {user_id}")
+                return -1
         
         # Add quiz filter if specified
         if quiz_id and quiz_id.lower() != "all":
-            query += " AND quiz_id = %s"
-            params.append(int(quiz_id))
+            try:
+                quiz_id_int = int(quiz_id)
+                query += " AND quiz_id = %s"
+                params.append(quiz_id_int)
+            except ValueError:
+                logger.error(f"Invalid quiz_id: {quiz_id}")
+                return -1
         
         # Get connection and execute
         conn = await get_db_connection()
         async with conn.cursor() as cursor:
             await cursor.execute(query, tuple(params))
             rows_affected = cursor.rowcount
-        conn.close()
         
         logger.info(f"Deleted {rows_affected} score records")
         return rows_affected
     except Exception as e:
         logger.error(f"Failed to delete scores: {str(e)}")
-        raise DatabaseQueryError(f"Failed to delete scores: {str(e)}")
+        return -1
+    finally:
+        if conn:
+            await release_connection(conn)
 
 # CHECK Functions
 async def has_taken_quiz(user_id: int, quiz_id: int) -> bool:
@@ -745,34 +918,46 @@ async def execute_transaction(queries: List[Tuple[str, Tuple]]) -> bool:
     Returns:
         bool: True if transaction was successful, False otherwise
     """
+    if not queries:
+        logger.warning("No queries provided for transaction")
+        return True  # Nothing to do
+        
     conn = None
     try:
         conn = await get_db_connection()
         
-        # Disable autocommit to start a transaction
-        await conn.cursor().execute("SET autocommit = 0")
-        
-        # Execute all queries
-        for query, params in queries:
-            async with conn.cursor() as cursor:
+        # Start transaction
+        async with conn.cursor() as cursor:
+            # Disable autocommit to start a transaction
+            await cursor.execute("SET autocommit = 0")
+            
+            # Execute all queries
+            for query, params in queries:
                 await cursor.execute(query, params)
-        
-        # Commit the transaction
-        await conn.cursor().execute("COMMIT")
-        
-        # Re-enable autocommit
-        await conn.cursor().execute("SET autocommit = 1")
-        
-        logger.info(f"Transaction of {len(queries)} queries completed successfully")
-        return True
+            
+            # Commit the transaction
+            await cursor.execute("COMMIT")
+            
+            logger.info(f"Transaction of {len(queries)} queries completed successfully")
+            return True
     except Exception as e:
         # Rollback on error
         if conn:
-            await conn.cursor().execute("ROLLBACK")
-            await conn.cursor().execute("SET autocommit = 1")
+            try:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("ROLLBACK")
+                    logger.info("Transaction rolled back due to error")
+            except Exception as rollback_error:
+                logger.error(f"Failed to rollback transaction: {str(rollback_error)}")
         
         logger.error(f"Transaction failed: {str(e)}")
         return False
     finally:
+        # Re-enable autocommit and release connection
         if conn:
-            conn.close()
+            try:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SET autocommit = 1")
+            except Exception as autocommit_error:
+                logger.error(f"Failed to reset autocommit: {str(autocommit_error)}")
+            await release_connection(conn)
