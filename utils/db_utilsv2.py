@@ -4,8 +4,53 @@ import aiomysql
 from typing import Optional, List, Tuple, Dict, Any, Union
 from config import CONFIG
 import json
+import functools
+from datetime import datetime, timedelta
 
 logger = logging.getLogger('badgey.db_utilsv2')
+
+# Simple time-based cache decorator
+def timed_cache(seconds=300):
+    """
+    A decorator that caches the result of a function for a specified time period.
+    
+    Args:
+        seconds (int): Number of seconds to cache the result
+        
+    Returns:
+        Decorated function with caching behavior
+    """
+    def decorator(func):
+        cache = {}
+        
+        @functools.wraps(func)
+        async def wrapper(*args, **kwargs):
+            # Create a cache key from the function args and kwargs
+            key = str(args) + str(sorted(kwargs.items()))
+            cached_result = cache.get(key)
+            
+            # Return cached result if it exists and hasn't expired
+            if cached_result and cached_result['expiry'] > datetime.now():
+                logger.debug(f"Cache hit for {func.__name__}{args}")
+                return cached_result['data']
+                
+            # Otherwise call the function and cache the result
+            result = await func(*args, **kwargs)
+            cache[key] = {
+                'data': result,
+                'expiry': datetime.now() + timedelta(seconds=seconds)
+            }
+            
+            # Cleanup old cache entries periodically
+            if len(cache) > 100:  # Prevent unlimited growth
+                current_time = datetime.now()
+                expired_keys = [k for k, v in cache.items() if v['expiry'] < current_time]
+                for k in expired_keys:
+                    del cache[k]
+            
+            return result
+        return wrapper
+    return decorator
 
 # Define custom exceptions for better error handling
 class DatabaseConnectionError(Exception):
@@ -249,9 +294,28 @@ async def setup_db() -> None:
         raise DatabaseConnectionError(f"Failed to setup database: {str(e)}")
 
 # GET functions
-async def get_quiz_questions(quiz_id) -> List[Tuple]:
+@timed_cache(seconds=60)
+async def get_quiz_name(quiz_id: int) -> Optional[Tuple[str]]:
     """
-    Get all questions for a specific quiz
+    Get the name of a specific quiz (cached for 60 seconds)
+    
+    Args:
+        quiz_id (int): ID of the quiz
+        
+    Returns:
+        Optional[Tuple[str]]: Tuple containing quiz name or None if not found
+    """
+    try:
+        query = "SELECT quiz_name FROM quizzes WHERE quiz_id = %s"
+        return await fetch_one(query, (quiz_id,))
+    except DatabaseQueryError as e:
+        logger.error(f"Error fetching quiz name for quiz {quiz_id}: {str(e)}")
+        return None
+
+@timed_cache(seconds=300)
+async def get_quiz_questions(quiz_id: int) -> List[Tuple]:
+    """
+    Get all questions for a specific quiz (cached for 5 minutes)
     
     Args:
         quiz_id (int): ID of the quiz
@@ -271,6 +335,21 @@ async def get_quiz_questions(quiz_id) -> List[Tuple]:
         logger.error(f"Failed to get quiz questions: {str(e)}")
         return []
 
+@timed_cache(seconds=300)
+async def get_all_quizzes() -> List[Tuple]:
+    """
+    Get all quizzes from the database (cached for 5 minutes)
+    
+    Returns:
+        List[Tuple]: List of (quiz_id, quiz_name) tuples
+    """
+    try:
+        query = "SELECT quiz_id, quiz_name FROM quizzes ORDER BY quiz_id ASC"
+        return await fetch_all(query)
+    except DatabaseQueryError as e:
+        logger.error(f"Failed to get all quizzes: {str(e)}")
+        return []
+
 async def get_question(question_id: int) -> Optional[Tuple]:
     """
     Get a specific question by ID
@@ -284,23 +363,6 @@ async def get_question(question_id: int) -> Optional[Tuple]:
         return await fetch_one(query, (question_id,))
     except DatabaseQueryError as e:
         logger.error(f"Failed to get question: {str(e)}")
-        return None
-
-async def get_quiz_name(quiz_id: int) -> Optional[Tuple[str]]:
-    """
-    Get the name of a specific quiz
-    
-    Args:
-        quiz_id (int): ID of the quiz
-        
-    Returns:
-        Optional[Tuple[str]]: Tuple containing quiz name or None if not found
-    """
-    try:
-        query = "SELECT quiz_name FROM quizzes WHERE quiz_id = %s"
-        return await fetch_one(query, (quiz_id,))
-    except DatabaseQueryError as e:
-        logger.error(f"Error fetching quiz name for quiz {quiz_id}: {str(e)}")
         return None
 
 async def get_quiz_scores(quiz_id: int) -> List[Tuple]:
@@ -389,20 +451,6 @@ async def get_user_scores_by_quiz_name(user_id: int, quiz_name: str) -> List[Tup
         return await fetch_all(query, (user_id, quiz_name))
     except DatabaseQueryError as e:
         logger.error(f"Failed to get user scores by quiz name: {str(e)}")
-        return []
-
-async def get_all_quizzes() -> List[Tuple]:
-    """
-    Get all quizzes from the database
-    
-    Returns:
-        List[Tuple]: List of (quiz_id, quiz_name) tuples
-    """
-    try:
-        query = "SELECT quiz_id, quiz_name FROM quizzes ORDER BY quiz_id ASC"
-        return await fetch_all(query)
-    except DatabaseQueryError as e:
-        logger.error(f"Failed to get all quizzes: {str(e)}")
         return []
 
 async def get_leaderboards(limit: int, parsed_quiz_ids: Optional[List[int]] = None) -> List[Dict[str, Any]]:

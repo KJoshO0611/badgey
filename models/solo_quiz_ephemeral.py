@@ -10,6 +10,8 @@ import string
 from collections import deque
 from config import CONFIG
 from utils.db_utilsv2 import get_quiz_questions, record_user_score, get_quiz_name
+import sys
+from utils.analytics import quiz_analytics
 
 logger = logging.getLogger('badgey.solo_quiz_ephemeral')
 
@@ -133,7 +135,45 @@ class EphemeralQuizView(discord.ui.View):
         self.message_id = self._generate_message_id()  # Unique message ID for this quiz instance
         self.retry_count = 0  # Counter for retries
         self.max_retries = 3  # Maximum number of retries for operations
+        self.quiz_start_time = time.time()  # Track when the quiz started
+        self._is_ended = False  # Flag to track if quiz has ended
+        
+        # Record quiz start in analytics
+        asyncio.create_task(self._record_quiz_start())
     
+    async def _record_quiz_start(self):
+        """Record quiz start in analytics"""
+        try:
+            guild_id = self.interaction.guild_id if self.interaction.guild else None
+            await quiz_analytics.record_quiz_start(self.user_id, self.quiz_id, guild_id)
+        except Exception as e:
+            logger.error(f"Error recording quiz start in analytics: {e}")
+
+    def __del__(self):
+        """Cleanup resources when object is garbage collected"""
+        self.cancel_all_timers()
+        logger.debug(f"EphemeralQuizView for user {self.user_id} cleaned up")
+
+    def cancel_all_timers(self):
+        """Cancel all active timers"""
+        # Cancel current question timer
+        if self.current_timer and not self.current_timer.done():
+            try:
+                self.current_timer.cancel()
+                logger.debug(f"Canceled current timer for user {self.user_id}")
+            except Exception as e:
+                logger.error(f"Error canceling current timer: {e}")
+        self.current_timer = None
+        
+        # Cancel auto-end timer
+        if self.auto_end_timer and not self.auto_end_timer.done():
+            try:
+                self.auto_end_timer.cancel()
+                logger.debug(f"Canceled auto-end timer for user {self.user_id}")
+            except Exception as e:
+                logger.error(f"Error canceling auto-end timer: {e}")
+        self.auto_end_timer = None
+
     def _generate_message_id(self):
         """Generate a unique message ID for this quiz instance"""
         timestamp = int(time.time())
@@ -175,6 +215,12 @@ class EphemeralQuizView(discord.ui.View):
     async def end_quiz(self):
         """End the quiz and show results"""
         try:
+            # Prevent duplicate endings
+            if self._is_ended:
+                logger.debug(f"Quiz already ended for user {self.user_id}")
+                return
+            self._is_ended = True
+                
             # Cancel auto-end timer if it exists
             if self.auto_end_timer:
                 self.auto_end_timer.cancel()
@@ -188,6 +234,18 @@ class EphemeralQuizView(discord.ui.View):
             if self.current_timer:
                 self.current_timer.cancel()
                 
+            # Record quiz completion in analytics
+            quiz_duration = time.time() - self.quiz_start_time
+            try:
+                await quiz_analytics.record_quiz_completion(
+                    self.user_id, 
+                    self.quiz_id, 
+                    quiz_duration, 
+                    self.score
+                )
+            except Exception as e:
+                logger.error(f"Error recording quiz completion: {e}")
+            
             # Get quiz name with retry logic
             quiz_name = f"Quiz {self.quiz_id}"  # Default name
             retries = 0
@@ -335,7 +393,7 @@ class EphemeralQuizView(discord.ui.View):
             await asyncio.sleep(timeout_seconds)
             
             # Check if quiz has already ended
-            if self.user_id not in quiz_queue.active_quizzes:
+            if self.user_id not in quiz_queue.active_quizzes or self._is_ended:
                 return
             
             logger.info(f"Auto-ending quiz for user {self.user_id} after {timeout_seconds} seconds of inactivity")
@@ -362,9 +420,16 @@ class EphemeralQuizView(discord.ui.View):
         
         except asyncio.CancelledError:
             # Task was cancelled normally (user ended quiz manually)
+            logger.debug(f"Auto-end timer cancelled for user {self.user_id}")
             pass
         except Exception as e:
-            logger.error(f"Error in auto-end quiz timer: {e}")
+            logger.error(f"Error in auto-end quiz timer: {e}", exc_info=True)
+            # Still try to end the quiz
+            if not self._is_ended:
+                try:
+                    await self.end_quiz()
+                except Exception:
+                    pass
 
     def cancel_timer(self):
         """Cancel the current timer if one exists"""
@@ -377,66 +442,68 @@ class EphemeralQuizView(discord.ui.View):
             self.auto_end_timer.cancel()
             self.auto_end_timer = None
 
-    async def run_question_timer(self, embed):
-        """Run a timer for the current question with error handling"""
+    async def run_timer(self, message, embed, question_index, question_instance_id):
+        """Run timer for a question"""
+        start_time = time.time()
         try:
+            # Store the timer's start time
+            self.start_time = start_time
             time_left = self.timer_task
+            
             while time_left > 0:
-                # Update only every 3 seconds or when time is low
-                if time_left % 3 == 0 or time_left <= 5:
-                    embed.set_footer(text=f"Time left: {time_left} seconds ⏳ | ID: {self.message_id}")
-                    try:
-                        if self.latest_response:
-                            await self.latest_response.edit(embed=embed)
-                    except discord.errors.NotFound:
-                        logger.warning(f"Message {self.message_id} not found during timer update.")
-                        return
-                    except Exception as e:
-                        logger.warning(f"Error updating timer: {e}")
-                        # Continue without failing the timer
-                
+                # Sleep first to avoid immediate update
                 await asyncio.sleep(1)
                 time_left -= 1
                 
-                # Check if we're transitioning to prevent timer from continuing
-                if self.transitioning:
-                    return
+                # Update only every 3 seconds or when time is low to reduce API calls
+                if time_left % 3 == 0 or time_left <= 5:
+                    # Stop if we're no longer on the same question or quiz has ended
+                    if self.index != question_index or self._is_ended:
+                        logger.debug(f"Timer stopped: index changed or quiz ended for user {self.user_id}")
+                        return
+                    
+                    # Update the footer text with remaining time
+                    new_footer = f"Time left: {time_left} seconds ⏳ | Quiz ID: {question_instance_id}"
+                    embed.set_footer(text=new_footer)
+                    
+                    # Try to update the message
+                    try:
+                        await message.edit(embed=embed)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException) as e:
+                        logger.warning(f"Failed to update timer for user {self.user_id}: {str(e)}")
+                        # Don't retry on these specific errors
+                        if isinstance(e, (discord.NotFound, discord.Forbidden)):
+                            return
             
-            # Time's up, move to next question if not already transitioning
-            if not self.transitioning:
+            # Time's up - check if we're still on the same question and not transitioning
+            if self.index == question_index and not self.transitioning and not self._is_ended:
+                logger.info(f"Time's up for question {question_index+1} for user {self.user_id}")
                 self.transitioning = True
                 
-                # Disable buttons after time is up
-                if self.children:
-                    for child in self.children:
-                        if isinstance(child, discord.ui.Button):
-                            child.disabled = True
-                
-                embed.add_field(
-                    name="Time's up!",
-                    value="Moving to next question...",
-                    inline=False
-                )
-                
                 try:
-                    if self.latest_response:
-                        await self.latest_response.edit(embed=embed, view=self)
-                    await asyncio.sleep(2)
-                except discord.errors.NotFound:
-                    logger.warning(f"Message {self.message_id} not found when time's up.")
-                    return
-                except Exception as e:
-                    logger.warning(f"Error updating message after time's up: {e}")
-                
-                # Move to next question
-                self.index += 1
-                self.transitioning = False
-                await self.show_question()
+                    # Process timeout (no answer selected)
+                    await self.process_timeout(message, question_instance_id)
+                finally:
+                    self.transitioning = False
+                    
         except asyncio.CancelledError:
-            # Normal cancellation, just exit
-            pass
+            # Timer was cancelled, exit silently
+            logger.debug(f"Timer cancelled for question {question_index+1} for user {self.user_id}")
+            return
         except Exception as e:
-            logger.error(f"Unexpected error in timer: {e}")
+            logger.error(f"Error in timer: {e}", exc_info=True)
+            # Try to recover and move to next question if possible
+            try:
+                if not self._is_ended and self.index == question_index:
+                    self.transitioning = True
+                    self.index += 1
+                    if self.index < len(self.questions):
+                        await self.show_question()
+                    else:
+                        await self.end_quiz()
+                    self.transitioning = False
+            except Exception as recovery_error:
+                logger.error(f"Failed to recover from timer error: {recovery_error}")
 
     async def show_question(self):
         """Display the current question to the user with retry logic"""
@@ -496,7 +563,7 @@ class EphemeralQuizView(discord.ui.View):
                     self.latest_response = await self.interaction.followup.send(embed=embed, view=self, ephemeral=True)
                 
                 # Start a new timer
-                self.current_timer = asyncio.create_task(self.run_question_timer(embed))
+                self.current_timer = asyncio.create_task(self.run_timer(self.latest_response, embed, self.index, self.message_id))
                 break
             except discord.errors.NotFound:
                 logger.warning(f"Message not found when showing question {self.index + 1}. Creating new message.")
@@ -505,7 +572,7 @@ class EphemeralQuizView(discord.ui.View):
                 try:
                     self.latest_response = await self.interaction.followup.send(embed=embed, view=self, ephemeral=True)
                     # Start a new timer
-                    self.current_timer = asyncio.create_task(self.run_question_timer(embed))
+                    self.current_timer = asyncio.create_task(self.run_timer(self.latest_response, embed, self.index, self.message_id))
                     break
                 except Exception as inner_e:
                     logger.error(f"Error creating new message: {inner_e}")
