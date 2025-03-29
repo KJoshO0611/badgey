@@ -290,6 +290,17 @@ class PlayerAnswerButton(discord.ui.Button):
                 except discord.errors.NotFound:
                     # Message may have been deleted
                     pass
+                    
+            # Add explanation if available and answer was wrong
+            if self.option_key != correct_answer and len(self.parent_view.question_data) > 6 and self.parent_view.question_data[6]:
+                try:
+                    await interaction.followup.send(
+                        f"**Explanation:** {self.parent_view.question_data[6]}",
+                        ephemeral=True
+                    )
+                except Exception as e:
+                    logger.error(f"Failed to send explanation: {e}")
+                    
         except Exception as e:
             logging.error(f"Error recording answer: {e}")
             await interaction.followup.send("There was an error recording your answer. Please try again or use the recovery button.", ephemeral=True)

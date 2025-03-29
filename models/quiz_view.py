@@ -263,13 +263,26 @@ class QuizCreationView(View):
                 await interaction.followup.send("Score must be a number. Using default value of 10.", ephemeral=True)
                 score_value = 10
             
+            # Get explanation
+            await interaction.followup.send("Enter an explanation for the correct answer (optional):", ephemeral=True)
+            try:
+                explanation = await interaction.client.wait_for(
+                    "message", 
+                    check=lambda m: m.author == interaction.user,
+                    timeout=60.0
+                )
+                explanation_text = explanation.content
+            except asyncio.TimeoutError:
+                explanation_text = None
+            
             # Add question to database
             await add_question(
                 self.quiz_id, 
                 question_text.content, 
                 options, 
                 correct_answer.content, 
-                score_value
+                score_value,
+                explanation_text
             )
             
             await interaction.followup.send(

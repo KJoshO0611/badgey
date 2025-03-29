@@ -122,7 +122,8 @@ class QuizCommandsCog(commands.Cog):
         question="The question text",
         options="Options in format 'A:Option 1 B:Option 2 C:Option 3'",
         correct_answer="The correct option (A, B, C, etc.)",
-        points="Points for this question"
+        points="Points for this question",
+        explanation="Explanation for the correct answer (optional)"
     )
     async def add_question_command(
         self, 
@@ -131,7 +132,8 @@ class QuizCommandsCog(commands.Cog):
         question: str,
         options: str,
         correct_answer: str,
-        points: int = 10
+        points: int = 10,
+        explanation: str = None
     ):
         if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']):
             await interaction.response.send_message("Uh-oh! You don't have permission to use this command! Guess someone's not in charge here! Hehehe!", ephemeral=True)
@@ -153,7 +155,7 @@ class QuizCommandsCog(commands.Cog):
                 return
             
             # Add question to database
-            await add_question(quiz_id, question, options_dict, correct_answer, points)
+            await add_question(quiz_id, question, options_dict, correct_answer, points, explanation)
             
             await interaction.followup.send(f"Question added successfully to quiz ID {quiz_id}!", ephemeral=True)
             logger.info(f"Question added to quiz {quiz_id} by {interaction.user.name}")

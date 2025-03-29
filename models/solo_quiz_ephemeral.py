@@ -173,148 +173,161 @@ class EphemeralQuizView(discord.ui.View):
         return False
 
     async def end_quiz(self):
-        """Ends the quiz, displays results, and notifies the queue manager"""
-        # Cancel any running timer
-        if self.current_timer:
-            self.current_timer.cancel()
+        """End the quiz and show results"""
+        try:
+            # Cancel auto-end timer if it exists
+            if self.auto_end_timer:
+                self.auto_end_timer.cancel()
+                self.auto_end_timer = None
+
+            # Check if quiz has already ended
+            if self.user_id not in quiz_queue.active_quizzes:
+                return
+            
+            # Cancel any running timer
+            if self.current_timer:
+                self.current_timer.cancel()
                 
-        # Get quiz name with retry logic
-        quiz_name = f"Quiz {self.quiz_id}"  # Default name
-        retries = 0
-        while retries < self.max_retries:
-            try:
-                quiz_result = await get_quiz_name(self.quiz_id)
-                if quiz_result:
-                    quiz_name = quiz_result[0]
-                break
-            except Exception as e:
-                retries += 1
-                logger.warning(f"Error getting quiz name (attempt {retries}/{self.max_retries}): {e}")
-                await asyncio.sleep(2 ** retries)
+            # Get quiz name with retry logic
+            quiz_name = f"Quiz {self.quiz_id}"  # Default name
+            retries = 0
+            while retries < self.max_retries:
+                try:
+                    quiz_result = await get_quiz_name(self.quiz_id)
+                    if quiz_result:
+                        quiz_name = quiz_result[0]
+                    break
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Error getting quiz name (attempt {retries}/{self.max_retries}): {e}")
+                    await asyncio.sleep(2 ** retries)
+            
+            # Create results embed
+            embed = discord.Embed(
+                title="Quiz Results",
+                description=f"completed: {quiz_name}",
+                color=discord.Color.gold()
+            )
+            
+            embed.add_field(
+                name="Score",
+                value=f"**{self.score}** points",
+                inline=True
+            )
+            
+            total_questions = len(self.questions)
+            embed.add_field(
+                name="Questions",
+                value=f"Completed {total_questions} questions",
+                inline=True
+            )
+            
+            # Add unique identifier to footer
+            embed.set_footer(text=f"Quiz ID: {self.message_id}")
+            
+            # Update the last question with a thank you message
+            thank_you_embed = discord.Embed(
+                title="Thank You for Participating!",
+                description=f"You've completed the quiz '{quiz_name}'. Your results are being sent to the channel.",
+                color=discord.Color.green()
+            )
+            
+            # Create an empty view with no buttons to replace the current view
+            empty_view = discord.ui.View()
+            
+            # Edit the question message with the thank you message and no buttons
+            retries = 0
+            while retries < self.max_retries:
+                try:
+                    if self.latest_response:
+                        await self.latest_response.edit(content=None, embed=thank_you_embed, view=empty_view)
+                    break
+                except discord.errors.NotFound:
+                    logger.warning(f"Message not found when sending thank you message.")
+                    break
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Error sending thank you message (attempt {retries}/{self.max_retries}): {e}")
+                    if retries >= self.max_retries:
+                        logger.error(f"Failed to send thank you message after {self.max_retries} attempts")
+                    await asyncio.sleep(2 ** retries)
+            
+            # Send public results in the channel (non-ephemeral)
+            # Create a public results embed
+            public_embed = discord.Embed(
+                title="Quiz Completed",
+                description=f"<@{self.user_id}> completed: {quiz_name}",
+                color=discord.Color.gold()
+            )
+            
+            public_embed.add_field(
+                            name="Score",
+                value=f"**{self.score}** points",
+                inline=True
+            )
+                        
+            public_embed.add_field(
+                name="Questions",
+                value=f"Completed {total_questions} questions",
+                inline=True
+            )
+            
+            # Add unique identifier to footer
+            #public_embed.set_footer(text=f"Quiz ID: {self.message_id}")
+            
+            # Send public results to the channel
+            retries = 0
+            while retries < self.max_retries:
+                try:
+                    await self.interaction.channel.send(
+                        embed=public_embed
+                    )
+                    logger.info(f"Sent public quiz results for user {self.user_id} in channel {self.interaction.channel.id}")
+                    break
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Error sending public quiz results (attempt {retries}/{self.max_retries}): {e}")
+                    if retries >= self.max_retries:
+                        logger.error(f"Failed to send public quiz results after {self.max_retries} attempts")
+                    await asyncio.sleep(2 ** retries)
+            
+            # Send ephemeral results as well for the user's reference
+            retries = 0
+            while retries < self.max_retries:
+                try:
+                    await self.interaction.followup.send(content="Quiz finished! Results have been posted in the channel.", embed=embed, ephemeral=True)
+                    break
+                except discord.errors.NotFound:
+                    # Message was likely deleted
+                    logger.warning(f"Interaction not found when sending quiz results.")
+                    break
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Error sending ephemeral quiz results (attempt {retries}/{self.max_retries}): {e}")
+                    if retries >= self.max_retries:
+                        logger.error(f"Failed to send ephemeral quiz results after {self.max_retries} attempts")
+                    await asyncio.sleep(2 ** retries)
+            
+            # Record score in database with retry logic
+            retries = 0
+            while retries < self.max_retries:
+                try:
+                    username = self.user_name if hasattr(self, 'user_name') and self.user_name else f"User-{self.user_id}"
+                    await record_user_score(self.user_id, username, self.quiz_id, self.score)
+                    logger.info(f"Recorded score for {username}: {self.score} points in quiz {self.quiz_id}")
+                    break
+                except Exception as e:
+                    retries += 1
+                    logger.warning(f"Error recording quiz score (attempt {retries}/{self.max_retries}): {e}")
+                    if retries >= self.max_retries:
+                        logger.error(f"Failed to record quiz score after {self.max_retries} attempts: {e}")
+                    await asyncio.sleep(2 ** retries)
+            
+            # Notify the queue manager that this quiz is done
+            await quiz_queue.finish_quiz(self.user_id)
         
-        # Create results embed
-        embed = discord.Embed(
-            title="Quiz Results",
-            description=f"completed: {quiz_name}",
-            color=discord.Color.gold()
-        )
-        
-        embed.add_field(
-            name="Score",
-            value=f"**{self.score}** points",
-            inline=True
-        )
-        
-        total_questions = len(self.questions)
-        embed.add_field(
-            name="Questions",
-            value=f"Completed {total_questions} questions",
-            inline=True
-        )
-        
-        # Add unique identifier to footer
-        embed.set_footer(text=f"Quiz ID: {self.message_id}")
-        
-        # Update the last question with a thank you message
-        thank_you_embed = discord.Embed(
-            title="Thank You for Participating!",
-            description=f"You've completed the quiz '{quiz_name}'. Your results are being sent to the channel.",
-            color=discord.Color.green()
-        )
-        
-        # Create an empty view with no buttons to replace the current view
-        empty_view = discord.ui.View()
-        
-        # Edit the question message with the thank you message and no buttons
-        retries = 0
-        while retries < self.max_retries:
-            try:
-                if self.latest_response:
-                    await self.latest_response.edit(content=None, embed=thank_you_embed, view=empty_view)
-                break
-            except discord.errors.NotFound:
-                logger.warning(f"Message not found when sending thank you message.")
-                break
-            except Exception as e:
-                retries += 1
-                logger.warning(f"Error sending thank you message (attempt {retries}/{self.max_retries}): {e}")
-                if retries >= self.max_retries:
-                    logger.error(f"Failed to send thank you message after {self.max_retries} attempts")
-                await asyncio.sleep(2 ** retries)
-        
-        # Send public results in the channel (non-ephemeral)
-        # Create a public results embed
-        public_embed = discord.Embed(
-            title="Quiz Completed",
-            description=f"<@{self.user_id}> completed: {quiz_name}",
-            color=discord.Color.gold()
-        )
-        
-        public_embed.add_field(
-                        name="Score",
-            value=f"**{self.score}** points",
-            inline=True
-        )
-                    
-        public_embed.add_field(
-            name="Questions",
-            value=f"Completed {total_questions} questions",
-            inline=True
-        )
-        
-        # Add unique identifier to footer
-        #public_embed.set_footer(text=f"Quiz ID: {self.message_id}")
-        
-        # Send public results to the channel
-        retries = 0
-        while retries < self.max_retries:
-            try:
-                await self.interaction.channel.send(
-                    embed=public_embed
-                )
-                logger.info(f"Sent public quiz results for user {self.user_id} in channel {self.interaction.channel.id}")
-                break
-            except Exception as e:
-                retries += 1
-                logger.warning(f"Error sending public quiz results (attempt {retries}/{self.max_retries}): {e}")
-                if retries >= self.max_retries:
-                    logger.error(f"Failed to send public quiz results after {self.max_retries} attempts")
-                await asyncio.sleep(2 ** retries)
-        
-        # Send ephemeral results as well for the user's reference
-        retries = 0
-        while retries < self.max_retries:
-            try:
-                await self.interaction.followup.send(content="Quiz finished! Results have been posted in the channel.", embed=embed, ephemeral=True)
-                break
-            except discord.errors.NotFound:
-                # Message was likely deleted
-                logger.warning(f"Interaction not found when sending quiz results.")
-                break
-            except Exception as e:
-                retries += 1
-                logger.warning(f"Error sending ephemeral quiz results (attempt {retries}/{self.max_retries}): {e}")
-                if retries >= self.max_retries:
-                    logger.error(f"Failed to send ephemeral quiz results after {self.max_retries} attempts")
-                await asyncio.sleep(2 ** retries)
-        
-        # Record score in database with retry logic
-        retries = 0
-        while retries < self.max_retries:
-            try:
-                username = self.user_name if hasattr(self, 'user_name') and self.user_name else f"User-{self.user_id}"
-                await record_user_score(self.user_id, username, self.quiz_id, self.score)
-                logger.info(f"Recorded score for {username}: {self.score} points in quiz {self.quiz_id}")
-                break
-            except Exception as e:
-                retries += 1
-                logger.warning(f"Error recording quiz score (attempt {retries}/{self.max_retries}): {e}")
-                if retries >= self.max_retries:
-                    logger.error(f"Failed to record quiz score after {self.max_retries} attempts: {e}")
-                await asyncio.sleep(2 ** retries)
-        
-        # Notify the queue manager that this quiz is done
-        await quiz_queue.finish_quiz(self.user_id)
+        except Exception as e:
+            logger.error(f"Error in end_quiz: {e}")
 
     async def auto_end_quiz(self, timeout_seconds=60):
         """Automatically end the quiz after a specified timeout if user doesn't end it manually"""
@@ -589,6 +602,14 @@ class EphemeralQuizButton(discord.ui.Button):
                         value=f"The correct answer was {correct_answer}",
                         inline=False
                     )
+                    
+                    # Add explanation if available
+                    if len(self.question_data) > 6 and self.question_data[6]:  # Check if explanation exists
+                        embed.add_field(
+                            name="Explanation",
+                            value=self.question_data[6],
+                            inline=False
+                        )
                 
                 # Update the footer with the unique ID
                 embed.set_footer(text=f"ID: {self.quiz_view.message_id}")
