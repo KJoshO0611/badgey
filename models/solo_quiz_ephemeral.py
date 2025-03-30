@@ -246,14 +246,16 @@ class EphemeralQuizView(discord.ui.View):
             except Exception as e:
                 logger.error(f"Error recording quiz completion: {e}")
             
-            # Get quiz name with retry logic
+            # Get quiz details with retry logic
             quiz_name = f"Quiz {self.quiz_id}"  # Default name
+            creator_username = "Unknown"
             retries = 0
             while retries < self.max_retries:
                 try:
                     quiz_result = await get_quiz_name(self.quiz_id)
                     if quiz_result:
                         quiz_name = quiz_result[0]
+                        creator_username = quiz_result[2] if len(quiz_result) > 2 and quiz_result[2] else "Unknown"
                     break
                 except Exception as e:
                     retries += 1
@@ -277,6 +279,13 @@ class EphemeralQuizView(discord.ui.View):
             embed.add_field(
                 name="Questions",
                 value=f"Completed {total_questions} questions",
+                inline=True
+            )
+            
+            # Add creator info
+            embed.add_field(
+                name="Quiz Creator",
+                value=creator_username,
                 inline=True
             )
             
@@ -319,7 +328,7 @@ class EphemeralQuizView(discord.ui.View):
             )
             
             public_embed.add_field(
-                            name="Score",
+                name="Score",
                 value=f"**{self.score}** points",
                 inline=True
             )
@@ -330,8 +339,12 @@ class EphemeralQuizView(discord.ui.View):
                 inline=True
             )
             
-            # Add unique identifier to footer
-            #public_embed.set_footer(text=f"Quiz ID: {self.message_id}")
+            # Add creator info to public results
+            public_embed.add_field(
+                name="Quiz Creator",
+                value=creator_username,
+                inline=True
+            )
             
             # Send public results to the channel
             retries = 0

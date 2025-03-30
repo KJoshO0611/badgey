@@ -460,20 +460,30 @@ class TimedQuizController:
                 return False
 
     async def initialize(self):
-        """Initialize the quiz by loading questions and quiz name"""
-        self.questions = await get_quiz_questions(self.quiz_id)
-        if not self.questions:
-            logger.error(f"No questions found for quiz {self.quiz_id}")
-            return False
-        
-        quiz_result = await get_quiz_name(self.quiz_id)
-        if not quiz_result:
-            logger.error(f"Quiz {self.quiz_id} not found")
-            return False
+        """Initialize the quiz by loading questions and quiz name."""
+        try:
+            # Get quiz details
+            quiz_result = await get_quiz_name(self.quiz_id)
+            if not quiz_result:
+                return False
+                
+            # Extract quiz name and creator info
+            self.quiz_name = quiz_result[0]
+            self.creator_id = quiz_result[1] if len(quiz_result) > 1 else None
+            self.creator_username = quiz_result[2] if len(quiz_result) > 2 and quiz_result[2] else "Unknown"
             
-        self.quiz_name = quiz_result[0]
-        logger.info(f"Quiz {self.quiz_id} ({self.quiz_name}) initialized with {len(self.questions)} questions")
-        return True
+            # Get questions
+            self.questions = await get_quiz_questions(self.quiz_id)
+            if not self.questions:
+                logger.error(f"No questions found for quiz {self.quiz_id}")
+                return False
+                
+            logger.info(f"Scheduled quiz {self.quiz_id} initialized with {len(self.questions)} questions")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize scheduled quiz: {e}")
+            return False
     
         # Add a task tracking mechanism to prevent stray tasks
     def create_task(self, coro):
@@ -955,7 +965,16 @@ class TimedQuizController:
             description=f"Your final score: **{player_score} points**",
             color=discord.Color.gold()
         )
+        
         final_embed.add_field(name="Your ranking", value=rank_text)
+        
+        # Add creator info if available
+        if hasattr(self, 'creator_username') and self.creator_username:
+            final_embed.add_field(
+                name="Quiz Creator",
+                value=self.creator_username,
+                inline=False
+            )
         
         # Either update existing message or send a new one through interaction
         if interaction:
@@ -999,6 +1018,14 @@ class TimedQuizController:
             color=discord.Color.gold()
         )
         
+        # Add creator info if available
+        if hasattr(self, 'creator_username') and self.creator_username:
+            embed.add_field(
+                name="Quiz Creator",
+                value=self.creator_username,
+                inline=False
+            )
+        
         # Add player scores
         for rank, (player_id, score) in enumerate(sorted_scores, 1):
             player = self.channel.guild.get_member(player_id)
@@ -1026,6 +1053,14 @@ class TimedQuizController:
                 description="This quiz has ended. See results below.",
                 color=discord.Color.green()
             )
+            
+            # Add creator info to the complete message too
+            if hasattr(self, 'creator_username') and self.creator_username:
+                complete_embed.add_field(
+                    name="Created by",
+                    value=self.creator_username,
+                    inline=False
+                )
             
             # Clear all items (buttons) from the view
             self.registration_view.clear_items()

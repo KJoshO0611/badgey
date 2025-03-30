@@ -295,21 +295,21 @@ async def setup_db() -> None:
 
 # GET functions
 @timed_cache(seconds=60)
-async def get_quiz_name(quiz_id: int) -> Optional[Tuple[str]]:
+async def get_quiz_name(quiz_id: int) -> Optional[Tuple]:
     """
-    Get the name of a specific quiz (cached for 60 seconds)
+    Get details of a specific quiz (cached for 60 seconds)
     
     Args:
         quiz_id (int): ID of the quiz
         
     Returns:
-        Optional[Tuple[str]]: Tuple containing quiz name or None if not found
+        Optional[Tuple]: Tuple containing quiz name, creator_id, creator_username or None if not found
     """
     try:
-        query = "SELECT quiz_name FROM quizzes WHERE quiz_id = %s"
+        query = "SELECT quiz_name, creator_id, creator_username FROM quizzes WHERE quiz_id = %s"
         return await fetch_one(query, (quiz_id,))
     except DatabaseQueryError as e:
-        logger.error(f"Error fetching quiz name for quiz {quiz_id}: {str(e)}")
+        logger.error(f"Error fetching quiz details for quiz {quiz_id}: {str(e)}")
         return None
 
 @timed_cache(seconds=300)
@@ -341,10 +341,10 @@ async def get_all_quizzes() -> List[Tuple]:
     Get all quizzes from the database (cached for 5 minutes)
     
     Returns:
-        List[Tuple]: List of (quiz_id, quiz_name) tuples
+        List[Tuple]: List of (quiz_id, quiz_name, creator_id, creator_username) tuples
     """
     try:
-        query = "SELECT quiz_id, quiz_name FROM quizzes ORDER BY quiz_id ASC"
+        query = "SELECT quiz_id, quiz_name, creator_id, creator_username FROM quizzes ORDER BY quiz_id ASC"
         return await fetch_all(query)
     except DatabaseQueryError as e:
         logger.error(f"Failed to get all quizzes: {str(e)}")
@@ -688,13 +688,14 @@ async def record_user_score(user_id: int, username: str, quiz_id: int, score: in
         logger.error(f"Failed to record score for user {username} (ID: {user_id}) on quiz {quiz_id}: {str(e)}")
         return False
 
-async def add_quiz(quiz_name: str, creator_id: str) -> Optional[int]:
+async def add_quiz(quiz_name: str, creator_id: str, creator_username: str = None) -> Optional[int]:
     """
     Add a new quiz to the database
     
     Args:
         quiz_name (str): Name of the quiz
         creator_id (str): ID of the creator
+        creator_username (str, optional): Username of the creator
         
     Returns:
         Optional[int]: Quiz ID if successful, None on failure
@@ -726,11 +727,17 @@ async def add_quiz(quiz_name: str, creator_id: str) -> Optional[int]:
                 logger.info(f"Quiz '{quiz_name}' already exists with ID {existing[0]}")
                 return existing[0]
             
-            # Insert the new quiz
-            await cursor.execute(
-                "INSERT INTO quizzes (quiz_name, creator_id) VALUES (%s, %s)",
-                (quiz_name, creator_id)
-            )
+            # Insert the new quiz with creator_username
+            if creator_username:
+                await cursor.execute(
+                    "INSERT INTO quizzes (quiz_name, creator_id, creator_username) VALUES (%s, %s, %s)",
+                    (quiz_name, creator_id, creator_username)
+                )
+            else:
+                await cursor.execute(
+                    "INSERT INTO quizzes (quiz_name, creator_id) VALUES (%s, %s)",
+                    (quiz_name, creator_id)
+                )
             
             # Get the new quiz ID
             await cursor.execute("SELECT LAST_INSERT_ID()")

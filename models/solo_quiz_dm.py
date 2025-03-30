@@ -105,6 +105,8 @@ class DMQuizView:
         self.is_running = False
         self.view = None
         self.answered = False  # Track if the current question has been answered
+        self._quiz_ended = False  # Flag to track if quiz has been ended
+        self._auto_end_task = None  # Store the auto-end task for cancellation
     
     async def initialize(self, quiz_id):
         """Initialize the quiz by loading questions"""
@@ -587,13 +589,15 @@ class DMQuizView:
                 logger.info(f"Quiz {self.quiz_instance_id} has already ended, ignoring duplicate end call")
                 return
             
-            # Mark quiz as ended
+            # Mark quiz as ended immediately to prevent race conditions
             self._quiz_ended = True
+            logger.info(f"Marked quiz {self.quiz_instance_id} as ended")
             
             # Cancel any pending auto-end timer
             if hasattr(self, '_auto_end_task') and self._auto_end_task:
                 self._auto_end_task.cancel()
                 self._auto_end_task = None
+                logger.info(f"Cancelled auto-end task for quiz {self.quiz_instance_id}")
             
             logger.info(f"Ending quiz {self.quiz_instance_id} for user {self.user_id}")
             
@@ -614,10 +618,10 @@ class DMQuizView:
                 except Exception as e:
                     logger.error(f"Failed to update last question message: {e}")
             
-            # Rest of the method remains unchanged
-            # Get quiz name
+            # Get quiz details
             quiz_result = await get_quiz_name(self.quiz_id)
             quiz_name = quiz_result[0] if quiz_result else f"Quiz {self.quiz_id}"
+            creator_username = quiz_result[2] if quiz_result and len(quiz_result) > 2 and quiz_result[2] else "Unknown"
             
             # Create results embed for DM
             dm_embed = discord.Embed(
@@ -636,6 +640,13 @@ class DMQuizView:
             dm_embed.add_field(
                 name="Questions",
                 value=f"Completed {total_questions} questions",
+                inline=False
+            )
+            
+            # Add creator info
+            dm_embed.add_field(
+                name="Quiz Creator",
+                value=creator_username,
                 inline=False
             )
             
@@ -670,6 +681,12 @@ class DMQuizView:
                         inline=True
                     )
                     
+                    server_embed.add_field(
+                        name="Created by",
+                        value=creator_username,
+                        inline=True
+                    )
+                    
                     await channel.send(embed=server_embed)
                     logger.info(f"Reported quiz results for {self.user_name} to channel {self.channel_id}")
             except Exception as e:
@@ -695,12 +712,17 @@ class DMQuizView:
     async def auto_end_quiz(self, timeout_seconds):
         """Automatically end the quiz after a timeout period if not ended by user"""
         try:
+            # Immediately check if the quiz has already been ended manually
+            if hasattr(self, '_quiz_ended') and self._quiz_ended:
+                logger.info(f"Quiz {self.quiz_instance_id} was already manually ended, skipping auto-end")
+                return
+                
             # Wait for the specified timeout period
             await asyncio.sleep(timeout_seconds)
             
-            # Check if the quiz has already been ended manually
+            # Check again if the quiz has already been ended manually
             if hasattr(self, '_quiz_ended') and self._quiz_ended:
-                logger.info(f"Quiz {self.quiz_instance_id} was already manually ended, skipping auto-end")
+                logger.info(f"Quiz {self.quiz_instance_id} was manually ended during wait period, skipping auto-end")
                 return
             
             # Check if we're still on the last question

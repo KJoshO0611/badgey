@@ -48,8 +48,13 @@ class QuizCommandsCog(commands.Cog):
                 timeout=60.0
             )
             
-            # Create quiz in database
-            quiz_id = await add_quiz(quiz_name_message.content, interaction.user.id)
+            # Create quiz in database with creator username
+            creator_username = interaction.user.display_name
+            quiz_id = await add_quiz(
+                quiz_name_message.content, 
+                interaction.user.id, 
+                creator_username
+            )
             
             await interaction.followup.send(
                 f"Quiz '{quiz_name_message.content}' created with ID: {quiz_id}! Use `/add_question {quiz_id} [question details]` to add questions.",
@@ -116,12 +121,15 @@ class QuizCommandsCog(commands.Cog):
             for quiz in quizzes:
                 quiz_id = quiz[0]
                 quiz_name = quiz[1]
+                creator_id = quiz[2]
+                creator_username = quiz[3] if len(quiz) > 3 and quiz[3] else "Unknown"
+                
                 questions = await get_quiz_questions(quiz_id)
                 question_count = len(questions) if questions else 0
                 
                 embed.add_field(
                     name=f"ID: {quiz_id} - {quiz_name}",
-                    value=f"Questions: {question_count}",
+                    value=f"Created by: {creator_username}\nQuestions: {question_count}",
                     inline=False
                 )
             
@@ -297,55 +305,66 @@ class QuizCommandsCog(commands.Cog):
         quiz_id: int,
     ):
         if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']):
-            await interaction.response.send_message("Uh-oh! You don't have permission to use this command! Guess someone's not in charge here! Hehehe!", ephemeral=True)
+            await interaction.response.send_message("You don't have permission to use this command.", ephemeral=True)
             return
         
         await interaction.response.defer()
         
         try:
-            # First get the quiz name
+            # Get quiz name
             quiz_result = await get_quiz_name(quiz_id)
-                    
+            
             if not quiz_result:
-                await interaction.followup.send(f"No quiz found with ID {quiz_id}.")
+                await interaction.followup.send(f"Quiz with ID {quiz_id} not found.", ephemeral=True)
                 return
-                
+            
             quiz_name = quiz_result[0]
+            creator_username = quiz_result[2] if len(quiz_result) > 2 and quiz_result[2] else "Unknown"
+            
+            # Get quiz questions
             questions = await get_quiz_questions(quiz_id)
             
             if not questions:
-                await interaction.followup.send(f"No questions found in quiz '{quiz_name}' (ID: {quiz_id}).")
+                await interaction.followup.send(f"No questions found for quiz '{quiz_name}'.", ephemeral=True)
                 return
             
-            # Create an embed with the questions list
+            # Create an embed with the question list
             embed = discord.Embed(
-                title=f"Questions for Quiz: {quiz_name}",
-                description=f"Quiz ID: {quiz_id} - Total Questions: {len(questions)}",
+                title=f"Questions for: {quiz_name}",
+                description=f"Created by: {creator_username}\nTotal questions: {len(questions)}",
                 color=discord.Color.blue()
             )
             
-            for question in questions:
+            # Add each question to the embed
+            for i, question in enumerate(questions, 1):
                 question_id = question[0]
                 question_text = question[2]
-                options = json.loads(question[3])
-                correct_answer = question[4]
-                points = question[5]
+                try:
+                    options = json.loads(question[3])
+                    options_text = "\n".join([f"{key}: {value}" for key, value in options.items()])
+                except:
+                    options_text = "Error parsing options"
                 
-                # Format options for display
-                # Safely handle options regardless of whether they're a string or a dictionary
-                if isinstance(options, str):
-                    options_text = options
-                else:
-                    try:
-                        options_text = "\n".join([f"{key}: {value}" for key, value in options.items()])
-                    except AttributeError:
-                        options_text = str(options)  # Fallback for any other type
+                correct_answer = question[4]
+                
+                # Truncate question text if too long
+                if len(question_text) > 100:
+                    question_text = question_text[:97] + "..."
                 
                 embed.add_field(
-                    name=f"Question ID: {question_id}",
-                    value=f"**Question:** {question_text}\n**Options:**\n{options_text}\n**Correct Answer:** {correct_answer}\n**Points:** {points}",
+                    name=f"Q{i}: {question_text}",
+                    value=f"ID: {question_id}\nOptions:\n{options_text}\nCorrect: {correct_answer}",
                     inline=False
                 )
+                
+                # Discord has a limit of 25 fields per embed
+                if i == 25:
+                    embed.add_field(
+                        name="Note",
+                        value="Only showing first 25 questions due to Discord limitations.",
+                        inline=False
+                    )
+                    break
             
             await interaction.followup.send(embed=embed)
             
