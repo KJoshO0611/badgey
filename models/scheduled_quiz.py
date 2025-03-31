@@ -291,15 +291,25 @@ class PlayerAnswerButton(discord.ui.Button):
                     # Message may have been deleted
                     pass
                     
-            # Add explanation if available and answer was wrong
-            if self.option_key != correct_answer and len(self.parent_view.question_data) > 6 and self.parent_view.question_data[6]:
-                try:
-                    await interaction.followup.send(
-                        f"**Explanation:** {self.parent_view.question_data[6]}",
-                        ephemeral=True
-                    )
-                except Exception as e:
-                    logger.error(f"Failed to send explanation: {e}")
+            # Create response message with explanation if available and answer was wrong
+            response_message = ""
+            if self.option_key != correct_answer:
+                response_message = f"❌ Incorrect. The correct answer is: {correct_answer}"
+                
+                # Add explanation if available
+                if len(self.parent_view.question_data) > 6 and self.parent_view.question_data[6]:
+                    response_message += f"\n\n**Explanation:** {self.parent_view.question_data[6]}"
+            else:
+                response_message = "✅ Correct!"
+                
+            # Send the combined message with explanation included
+            try:
+                await interaction.followup.send(
+                    response_message,
+                    ephemeral=True
+                )
+            except Exception as e:
+                logger.error(f"Failed to send answer response: {e}")
                     
         except Exception as e:
             logging.error(f"Error recording answer: {e}")

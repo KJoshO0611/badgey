@@ -49,7 +49,7 @@ class QuizCommandsCog(commands.Cog):
             )
             
             # Create quiz in database with creator username
-            creator_username = interaction.user.display_name
+            creator_username = interaction.user.name
             quiz_id = await add_quiz(
                 quiz_name_message.content, 
                 interaction.user.id, 
