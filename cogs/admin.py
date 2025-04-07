@@ -178,16 +178,15 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         start_date="Start date for logs (YYYY-MM-DD)",
         end_date="End date for logs (YYYY-MM-DD)",
-        channel="Optional: Channel to get logs from (defaults to all text channels)"
+        channel="Optional: Text channel or Forum to get logs from (defaults to all)"
     )
-    async def get_logs(self, interaction: discord.Interaction, start_date: str, end_date: str, channel: typing.Optional[discord.TextChannel]):
-        """Fetches chat logs as a CSV file within a specified date range and optional channel."""
+    async def get_logs(self, interaction: discord.Interaction, start_date: str, end_date: str, channel: typing.Optional[typing.Union[discord.TextChannel, discord.ForumChannel]]):
+        """Fetches chat logs as a CSV file from channels/forums and their threads/posts."""
 
         if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']):
             await interaction.response.send_message("Uh-oh! You don't have permission to use this command!", ephemeral=True)
             return
 
-        # Defer response publicly
         await interaction.response.defer(ephemeral=False, thinking=True)
 
         try:
@@ -204,41 +203,57 @@ class AdminCog(commands.Cog):
                 return
 
             all_messages = []
-            target_channels = []
             guild = interaction.guild
+            target_text_channels = []
+            target_forum_channels = []
+            processed_items = 0
+            total_items = 0 # We'll calculate this later
 
+            # --- Determine target channels/forums ---
             if channel:
                 if isinstance(channel, discord.TextChannel):
-                    target_channels.append(channel)
+                    if channel.permissions_for(guild.me).read_message_history:
+                        target_text_channels.append(channel)
+                    else:
+                         await interaction.followup.send(f"I don't have permission to read history in {channel.mention}.", ephemeral=True)
+                         return
+                elif isinstance(channel, discord.ForumChannel):
+                     if channel.permissions_for(guild.me).read_message_history: # Check forum level permission
+                        target_forum_channels.append(channel)
+                     else:
+                         await interaction.followup.send(f"I don't have permission to read posts in the forum {channel.mention}.", ephemeral=True)
+                         return
                 else:
-                    await interaction.followup.send("Invalid channel type specified.", ephemeral=True)
+                    # Should not happen with Union type hint, but good practice
+                    await interaction.followup.send("Invalid channel type specified. Please select a text channel or forum.", ephemeral=True)
                     return
             else:
-                # Fetch from all text channels the bot can see
-                target_channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
+                # Fetch all accessible text channels
+                target_text_channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
+                # Fetch all accessible forum channels
+                target_forum_channels = [fc for fc in guild.forums if fc.permissions_for(guild.me).read_message_history]
 
-            if not target_channels:
-                 await interaction.followup.send("No accessible text channels found to fetch logs from.", ephemeral=True)
+            if not target_text_channels and not target_forum_channels:
+                 await interaction.followup.send("No accessible text channels or forums found to fetch logs from.", ephemeral=True)
                  return
 
-            processed_count = 0
-            total_channels = len(target_channels)
+            total_items = len(target_text_channels) + len(target_forum_channels) # Initial count
 
-            for current_channel in target_channels:
-                processed_count += 1
-                logger.info(f"Processing channel {processed_count}/{total_channels}: {current_channel.name} ({current_channel.id})")
+            # --- Process Text Channels ---
+            for current_channel in target_text_channels:
+                processed_items += 1
+                logger.info(f"Processing Text Channel {processed_items}/{total_items}: {current_channel.name} ({current_channel.id})")
                 # Fetch logs from the main channel
                 channel_messages = await self._fetch_and_format_logs(current_channel, start_dt, end_dt)
                 all_messages.extend(channel_messages)
 
-                # Fetch logs from active threads in the channel
+                # Fetch logs from active threads in the text channel
                 try:
-                    # Fetch all active threads in the guild
+                    # Using guild.active_threads + filter for compatibility
                     guild_threads = await guild.active_threads()
-                    # Filter threads belonging to the current channel
-                    threads = [t for t in guild_threads if t.parent_id == current_channel.id]
+                    channel_threads = [t for t in guild_threads if t.parent_id == current_channel.id]
 
-                    for thread in threads:
+                    for thread in channel_threads:
                         if thread.permissions_for(guild.me).read_message_history:
                            logger.info(f"Processing thread: {thread.name} ({thread.id}) in channel {current_channel.name}")
                            thread_messages = await self._fetch_and_format_logs(thread, start_dt, end_dt)
@@ -246,11 +261,49 @@ class AdminCog(commands.Cog):
                         else:
                            logger.warning(f"Skipping thread {thread.name} due to missing permissions.")
                 except discord.Forbidden:
-                    logger.warning(f"Missing permissions to list threads in {current_channel.name}")
+                    logger.warning(f"Missing permissions to list threads in text channel {current_channel.name}")
                 except discord.HTTPException as e:
-                     logger.error(f"HTTP error fetching threads for {current_channel.name}: {e}")
+                     logger.error(f"HTTP error fetching threads for text channel {current_channel.name}: {e}")
 
-            # Sort messages chronologically (optional, history should be mostly ordered)
+            # --- Process Forum Channels ---
+            for forum_channel in target_forum_channels:
+                processed_items += 1
+                logger.info(f"Processing Forum {processed_items}/{total_items}: {forum_channel.name} ({forum_channel.id})")
+                forum_posts = []
+                 # Fetch active posts (threads)
+                try:
+                    forum_posts.extend(forum_channel.threads) # Active threads are directly available
+                except Exception as e: # Broad catch in case of unexpected issues
+                     logger.error(f"Error fetching active posts for forum {forum_channel.name}: {e}")
+
+                # Fetch archived posts (threads) within the date range
+                # Note: archived_threads might be slow if there are many
+                try:
+                    async for thread in forum_channel.archived_threads(limit=None, after=start_dt, before=end_dt):
+                         # Check if already included (though unlikely for active/archived overlap by ID)
+                         if thread.id not in [p.id for p in forum_posts]:
+                             forum_posts.append(thread)
+                except discord.Forbidden:
+                     logger.warning(f"Missing permissions to view archived posts in forum {forum_channel.name}")
+                except discord.HTTPException as e:
+                     logger.error(f"HTTP error fetching archived posts for forum {forum_channel.name}: {e}")
+                except Exception as e:
+                     logger.error(f"Unexpected error fetching archived posts for forum {forum_channel.name}: {e}")
+
+
+                for post in forum_posts:
+                    if post.created_at >= start_dt and post.created_at <= end_dt: # Ensure post itself is within range
+                        if post.permissions_for(guild.me).read_message_history:
+                            logger.info(f"Processing forum post: {post.name} ({post.id}) in forum {forum_channel.name}")
+                            post_messages = await self._fetch_and_format_logs(post, start_dt, end_dt)
+                            all_messages.extend(post_messages)
+                        else:
+                            logger.warning(f"Skipping forum post {post.name} due to missing read history permissions.")
+                    # else: # Optional: Log skipped posts outside date range
+                    #    logger.debug(f"Skipping forum post {post.name} created at {post.created_at}, outside date range.")
+
+
+            # Sort messages chronologically
             all_messages.sort(key=lambda x: datetime.datetime.strptime(x['Timestamp'], "%Y-%m-%d %H:%M:%S UTC"))
 
             # Prepare CSV file
@@ -259,7 +312,7 @@ class AdminCog(commands.Cog):
                 return
 
             output = io.StringIO()
-            headers = ["Timestamp", "Author", "AuthorID", "Channel", "Thread", "Content", "Reactions"]
+            headers = ["Timestamp", "Author", "AuthorID", "Channel", "Thread", "Content", "Reactions", "Attachments"]
             writer = csv.DictWriter(output, fieldnames=headers)
             writer.writeheader()
             writer.writerows(all_messages)
@@ -268,14 +321,14 @@ class AdminCog(commands.Cog):
             csv_content = output.getvalue()
             output.close()
 
-            log_filename = f"logs_{start_date}_to_{end_date}_{channel.name if channel else 'all'}.csv"
+            channel_name_part = channel.name if channel else 'all'
+            log_filename = f"logs_{start_date}_to_{end_date}_{channel_name_part}.csv"
             log_bytes = csv_content.encode('utf-8')
 
             # Check file size (Discord limit is 25MB)
             if len(log_bytes) > 25 * 1024 * 1024:
-                 # Try sending a message indicating the size issue first
-                 await interaction.followup.send("Log file is too large (>25MB) to upload. Please narrow your date range or specify a channel.", ephemeral=True)
-                 return # Stop before attempting to send the large file
+                 await interaction.followup.send("Log file is too large (>25MB) to upload. Please narrow your date range or specify a channel/forum.", ephemeral=True)
+                 return
 
             file = discord.File(io.BytesIO(log_bytes), filename=log_filename)
             await interaction.followup.send("Here are the logs you requested!", file=file)
@@ -284,15 +337,13 @@ class AdminCog(commands.Cog):
              await interaction.followup.send("Interaction expired or could not be found.", ephemeral=True)
         except discord.Forbidden as e:
             logger.error(f"Permission error in get_logs: {e}")
-            await interaction.followup.send(f"I seem to be missing permissions to perform this action. Error: {e}", ephemeral=True)
+            await interaction.followup.send(f"I seem to be missing permissions to perform this action. Check channel/forum/thread permissions. Error: {e}", ephemeral=True)
         except Exception as e:
             logger.error(f"Error fetching logs: {e}", exc_info=True)
-            # Check if the interaction has already been responded to
             try:
                  await interaction.followup.send(f"Oops! Something went wrong while fetching logs: {str(e)}", ephemeral=True)
             except discord.errors.InteractionResponded:
                  logger.warning("Interaction already responded to when trying to send error message.")
-                 # Optionally send to a log channel or print
                  print(f"Error in get_logs for interaction {interaction.id}: {e}")
 
     # Helper function to fetch and format logs from a channel/thread
@@ -309,6 +360,10 @@ class AdminCog(commands.Cog):
                 reaction_str = ", ".join([f"{reaction.emoji}: {reaction.count}" for reaction in message.reactions])
                 reaction_str = f"[{reaction_str}]" if reaction_str else ""
 
+                # Format attachments
+                attachment_urls = [att.url for att in message.attachments]
+                attachment_str = "\n".join(attachment_urls) # Separate multiple URLs with newlines
+
                 messages_data.append({
                     "Timestamp": message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
                     "Author": str(message.author),
@@ -316,7 +371,8 @@ class AdminCog(commands.Cog):
                     "Channel": parent_channel_name,
                     "Thread": thread_name,
                     "Content": message.clean_content,
-                    "Reactions": reaction_str
+                    "Reactions": reaction_str,
+                    "Attachments": attachment_str # Add attachment URLs here
                 })
         except discord.Forbidden:
             logger.warning(f"Missing permissions to read history for {channel_name}{f' (thread in {parent_channel_name})' if is_thread else ''}")
