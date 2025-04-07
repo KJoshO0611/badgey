@@ -29,22 +29,20 @@ class QuizPlayCog(commands.Cog):
     @app_commands.command(name="take_quiz", description="Take a quiz individually")
     @app_commands.describe(
         quiz_id="The ID of the quiz to take",
-        mode="Quiz mode: ephemeral or dm",
-        timer="Time in seconds for each question (default: 20)"
     )
-    @app_commands.choices(mode=[
-        app_commands.Choice(name="Ephemeral", value="ephemeral"),
-        app_commands.Choice(name="Direct Message", value="dm")
-    ])
-    async def take_quiz(self, interaction: discord.Interaction, quiz_id: int, mode: str = "ephemeral", timer: int = 20):
-        # Defer response to buy time for loading
-        await interaction.response.defer(ephemeral=(mode == "ephemeral" or mode == "dm"))
+    async def take_quiz(self, interaction: discord.Interaction, quiz_id: int):
+        # Hardcoded defaults
+        mode = "ephemeral"
+        timer = 20
+
+        # Defer response ephemerally
+        await interaction.response.defer(ephemeral=True)
         
         try:
             # Check if the quiz exists
             quiz_result = await get_quiz_name(quiz_id)
             if not quiz_result:
-                await interaction.followup.send("That quiz doesn't exist. Use /list_quizzes to see available quizzes.", ephemeral=(mode == "ephemeral" or mode == "dm"))
+                await interaction.followup.send("That quiz doesn't exist. Use /list_quizzes to see available quizzes.", ephemeral=True)
                 return
                 
             quiz_name = quiz_result[0]
@@ -58,52 +56,27 @@ class QuizPlayCog(commands.Cog):
                 )
                 return
             
-            if mode == "ephemeral":
-                logger.info(f"User {interaction.user.id} requested quiz {quiz_id} with {timer}s timer")
-                
-                # Validate timer
-                if timer < 5 or timer > 300:
-                    await interaction.followup.send(
-                        "Timer must be between 5 and 300 seconds.", 
-                        ephemeral=True
-                    )
-                    return
-                
-                # Add to queue and let the queue system handle the rest
-                await quiz_queue.add_request(
-                    interaction.user.id,
-                    interaction,
-                    quiz_id,
-                    timer,
-                    interaction.user.display_name
-                )
-                
-            elif mode == "dm":
-                # DM quiz - Send in direct messages and report back to channel
-                # Validate input
-                if timer < 5 or timer > 120:
-                    await interaction.followup.send("Timer must be between 5 and 120 seconds.", ephemeral=True)
-                    return
-                    
-                user_id = interaction.user.id
-                channel_id = interaction.channel_id
-                user = interaction.user
-                user_name = interaction.user.display_name
-                
-                try:
-                    # Add user to queue with the new method
-                    success, message = await self.queue.add_to_queue(
-                        user_id, channel_id, user, quiz_id, timer, user_name)
-                    
-                    await interaction.followup.send(message, ephemeral=True)
-                    
-                except Exception as e:
-                    logger.error(f"Error adding user to quiz queue: {e}")
-                    await interaction.followup.send("There was an error starting the quiz. Please try again later.", ephemeral=True)
-                    
+            # Always use ephemeral mode with fixed timer
+            logger.info(f"User {interaction.user.id} requested quiz {quiz_id} with {timer}s timer (ephemeral mode)")
+            
+            # No timer validation needed as it's hardcoded
+            
+            # Add to queue and let the queue system handle the rest
+            await quiz_queue.add_request(
+                interaction.user.id,
+                interaction,
+                quiz_id,
+                timer, # Use the hardcoded timer
+                interaction.user.display_name
+            )
+                            
         except Exception as e:
             logger.error(f"Error starting quiz: {e}")
-            await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=(mode == "ephemeral" or mode == "dm"))
+            # Ensure error messages are ephemeral
+            try:
+                await interaction.followup.send(f"An error occurred: {str(e)}", ephemeral=True)
+            except discord.errors.InteractionResponded: # If defer already failed/timed out
+                logger.warning(f"Could not send error followup for quiz {quiz_id} to user {interaction.user.id}")
         
     @app_commands.command(name="schedule_quiz", description="Schedule a quiz to start at a specific time")
     @app_commands.describe(
