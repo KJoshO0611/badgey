@@ -9,7 +9,7 @@ from models.solo_quiz_ephemeral import EphemeralQuizView
 from models.solo_quiz_dm import DMQuizView
 from models.scheduled_quiz import TimedQuizController
 from utils.helpers import has_required_role
-from utils.db_utilsv2 import get_quiz_name, has_taken_quiz
+from utils.db_utilsv2 import get_quiz_name, has_taken_quiz, set_guild_setting
 from models.solo_quiz_ephemeral import quiz_queue
 from models.solo_quiz_dm import QuizQueue
 
@@ -89,9 +89,9 @@ class QuizPlayCog(commands.Cog):
                  logger.info(f"User {interaction.user.id} requested quiz {quiz_id} with {timer}s timer (DM mode)")
                 
                  try:
-                     # Add user to queue with the new method
+                     # Add user to queue with the new method, including guild_id
                      success, message = await self.queue.add_to_queue(
-                         user_id, channel_id, user, quiz_id, timer, user_name)
+                         user_id, channel_id, interaction.guild.id, user, quiz_id, timer, user_name)
                     
                      # Send confirmation ephemerally
                      await interaction.followup.send(message, ephemeral=True)
@@ -151,18 +151,28 @@ class QuizPlayCog(commands.Cog):
     @app_commands.describe(channel="The channel to report quiz results to")
     async def set_results_channel(self, interaction: discord.Interaction, channel: discord.TextChannel):
         """Set the channel where DM quiz results should be reported"""
-        if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']):
+        if not interaction.guild:
+             await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+             return
+             
+        if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']): # Keep role check based on global config or move role config to DB too?
             await interaction.response.send_message("You don't have permission to use this command!", ephemeral=True)
             return
             
-        # You would typically store this in a database or config
-        # For this example, we'll just store it in CONFIG
-        CONFIG['QUIZ_RESULTS_CHANNEL'] = channel.id
+        # Store the setting in the database for this specific guild
+        guild_id = interaction.guild.id
+        setting_key = 'quiz_results_channel_id'
+        setting_value = str(channel.id)
         
-        await interaction.response.send_message(
-            f"Quiz results channel has been set to {channel.mention}. Results from DM quizzes will be reported here.",
-            ephemeral=True
-        )        
+        try:
+            await set_guild_setting(guild_id, setting_key, setting_value)
+            await interaction.response.send_message(
+                f"Quiz results channel has been set to {channel.mention} for this server. Results from DM quizzes will be reported here.",
+                ephemeral=True
+            )
+        except Exception as e: # Catch potential DB errors
+             logger.error(f"Failed to set results channel for guild {guild_id}: {e}")
+             await interaction.response.send_message("Failed to save the results channel setting. Please try again later.", ephemeral=True)
 
 async def setup(bot):
     await bot.add_cog(QuizPlayCog(bot))

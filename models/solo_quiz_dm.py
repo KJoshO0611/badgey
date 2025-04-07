@@ -5,19 +5,19 @@ import asyncio
 import time
 import json
 from config import CONFIG
-from utils.db_utilsv2 import get_quiz_questions, record_user_score, get_quiz_name
+from utils.db_utilsv2 import get_quiz_questions, record_user_score, get_quiz_name, get_guild_setting
 
 logger = logging.getLogger('badgey.solo_quiz_dm')
 
 class QuizQueue:
     """Manages a queue of users waiting to take quizzes with rate limiting"""
     def __init__(self):
-        self.queue = []  # List of (user_id, channel_id, user, quiz_id, timer) tuples
+        self.queue = []  # List of (user_id, channel_id, guild_id, user, quiz_id, timer, user_name) tuples
         self.active_quizzes = {}  # Map of user_id to timestamp of when they started
         self.cooldown = 300  # Cooldown period in seconds (5 minutes)
         self.lock = asyncio.Lock()
     
-    async def add_to_queue(self, user_id, channel_id, user, quiz_id, timer, user_name=None):
+    async def add_to_queue(self, user_id, channel_id, guild_id, user, quiz_id, timer, user_name=None):
         """Add a user to the quiz queue if they're not on cooldown"""
         async with self.lock:
             current_time = time.time()
@@ -32,7 +32,7 @@ class QuizQueue:
                     return False, f"You need to wait {time_remaining} seconds before starting another quiz."
             
             # Add user to queue
-            self.queue.append((user_id, channel_id, user, quiz_id, timer, user_name))
+            self.queue.append((user_id, channel_id, guild_id, user, quiz_id, timer, user_name))
             position = len(self.queue)
             
             return True, f"You've been added to the quiz queue. Position: {position}"
@@ -44,7 +44,7 @@ class QuizQueue:
                 async with self.lock:
                     if self.queue:
                         # Process the next item in queue
-                        user_id, channel_id, user, quiz_id, timer, user_name = self.queue[0]
+                        user_id, channel_id, guild_id, user, quiz_id, timer, user_name = self.queue[0]
                         self.queue.pop(0)
                         
                         # Mark as active
@@ -52,8 +52,8 @@ class QuizQueue:
                         
                         # Start the quiz for this user
                         try:
-                            # Create the quiz view
-                            quiz_view = DMQuizView(user_id, channel_id, user, bot, quiz_id, timer, user_name)
+                            # Create the quiz view, passing guild_id
+                            quiz_view = DMQuizView(user_id, channel_id, guild_id, user, bot, quiz_id, timer, user_name)
                             success = await quiz_view.initialize(quiz_id)
                             
                             if success:
@@ -89,11 +89,12 @@ class QuizQueue:
 
 class DMQuizView:
     """View for displaying individual quiz questions and handling responses in direct messages"""
-    def __init__(self, user_id, channel_id, user, bot, quiz_id, timer, user_name=None):
+    def __init__(self, user_id, channel_id, guild_id, user, bot, quiz_id, timer, user_name=None):
         self.quiz_id = quiz_id
         self.user_id = user_id
         self.user_name = user_name or f"User-{user_id}"
         self.channel_id = channel_id
+        self.guild_id = guild_id
         self.user = user
         self.bot = bot
         self.score = 0
@@ -579,135 +580,105 @@ class DMQuizView:
                 pass
     
     async def end_quiz(self):
-        """End the quiz and show results"""
+        """End the quiz, calculate score, send results to user and report to results channel."""
+        if self._quiz_ended:
+            return # Avoid ending multiple times
+        self._quiz_ended = True
+        self.is_running = False
+        
+        # Cancel any pending auto-end task
+        if self._auto_end_task:
+            self._auto_end_task.cancel()
+        
         try:
-            # Set flag to indicate quiz is finished to prevent other processes from interfering
-            self.is_running = False
-            
-            # Check if we've already ended this quiz
-            if hasattr(self, '_quiz_ended') and self._quiz_ended:
-                logger.info(f"Quiz {self.quiz_instance_id} has already ended, ignoring duplicate end call")
-                return
-            
-            # Mark quiz as ended immediately to prevent race conditions
-            self._quiz_ended = True
-            logger.info(f"Marked quiz {self.quiz_instance_id} as ended")
-            
-            # Cancel any pending auto-end timer
-            if hasattr(self, '_auto_end_task') and self._auto_end_task:
-                self._auto_end_task.cancel()
-                self._auto_end_task = None
-                logger.info(f"Cancelled auto-end task for quiz {self.quiz_instance_id}")
-            
-            logger.info(f"Ending quiz {self.quiz_instance_id} for user {self.user_id}")
-            
-            # First, update the last question message if it exists
-            if self.current_message:
-                try:
-                    # Create a completely new embed instead of copying the old one
-                    clean_embed = discord.Embed(
-                        title="Quiz Complete",
-                        description="Thank you for participating in this quiz! Your results are below.",
-                        color=discord.Color.green()
-                    )
-                    
-                    # Update the message with the clean embed and no buttons
-                    await self.current_message.edit(embed=clean_embed, view=None)
-                    
-                    logger.info(f"Updated final question message for user {self.user_id}")
-                except Exception as e:
-                    logger.error(f"Failed to update last question message: {e}")
-            
-            # Get quiz details
+            # Get quiz name for reporting
             quiz_result = await get_quiz_name(self.quiz_id)
             quiz_name = quiz_result[0] if quiz_result else f"Quiz {self.quiz_id}"
-            creator_username = quiz_result[2] if quiz_result and len(quiz_result) > 2 and quiz_result[2] else "Unknown"
             
-            # Create results embed for DM
-            dm_embed = discord.Embed(
-                title="Quiz Results",
-                description=f"You've completed: {quiz_name}",
-                color=discord.Color.gold()
-            )
-            
-            dm_embed.add_field(
-                name="Your Score",
-                value=f"**{self.score}** points",
-                inline=False
-            )
-            
-            total_questions = len(self.questions)
-            dm_embed.add_field(
-                name="Questions",
-                value=f"Completed {total_questions} questions",
-                inline=False
-            )
-            
-            # Add creator info
-            dm_embed.add_field(
-                name="Quiz Creator",
-                value=creator_username,
-                inline=False
-            )
-            
-            # Add instance ID to track this specific quiz
-            dm_embed.set_footer(text=f"Quiz ID: {self.quiz_instance_id}")
-            
-            # Send DM results
-            try:
-                await self.user.send(content="Quiz finished!", embed=dm_embed)
-            except Exception as e:
-                logger.error(f"Failed to send final results DM: {e}")
-            
-            # Now send results to the server channel
-            try:
-                channel = self.bot.get_channel(self.channel_id)
-                if channel:
-                    server_embed = discord.Embed(
-                        title="Quiz Completed",
-                        description=f"{self.user.mention} has completed: **{quiz_name}**",
-                        color=discord.Color.gold()
-                    )
-                    
-                    server_embed.add_field(
-                        name="Score",
-                        value=f"**{self.score}** points",
-                        inline=True
-                    )
-                    
-                    server_embed.add_field(
-                        name="Questions",
-                        value=f"Completed {total_questions} questions",
-                        inline=True
-                    )
-                    
-                    server_embed.add_field(
-                        name="Created by",
-                        value=creator_username,
-                        inline=True
-                    )
-                    
-                    await channel.send(embed=server_embed)
-                    logger.info(f"Reported quiz results for {self.user_name} to channel {self.channel_id}")
-            except Exception as e:
-                logger.error(f"Error reporting quiz results to channel: {e}")
-        
             # Record score in database
-            try:
-                username = self.user_name
-                await record_user_score(self.user_id, username, self.quiz_id, self.score)
-                logger.info(f"Recorded score for {username}: {self.score} points in quiz {self.quiz_id}")
-            except Exception as e:
-                logger.error(f"Error recording quiz score: {e}")
-                
+            await record_user_score(self.user_id, self.user_name, self.quiz_id, self.score)
+            
+            # Send final score message to user via DM
+            final_message = (
+                f"\n**Quiz Finished!**\n\n"
+                f"**Quiz:** {quiz_name}\n"
+                f"**Your Score:** {self.score}"
+            )
+            if self.current_message and isinstance(self.current_message, discord.Message):
+                await self.current_message.edit(content=final_message, view=None, embed=None)
+            else:
+                # If message somehow got lost, send a new one
+                await self.user.send(final_message)
+            
+            logger.info(f"Quiz {self.quiz_id} ended for user {self.user_id}. Final score: {self.score}")
+            
+            # --- Report results to guild channel --- #
+            results_channel_id_str = await get_guild_setting(self.guild_id, 'quiz_results_channel_id')
+            
+            if results_channel_id_str:
+                try:
+                    results_channel_id = int(results_channel_id_str)
+                    results_channel = self.bot.get_channel(results_channel_id)
+                    
+                    if results_channel and isinstance(results_channel, discord.TextChannel):
+                         # Check permissions before sending
+                         if results_channel.permissions_for(results_channel.guild.me).send_messages:
+                            # Revert embed format to the previous style
+                            # Ensure quiz_result includes creator username, adjust if needed based on get_quiz_name return value
+                            creator_username = quiz_result[2] if len(quiz_result) > 2 and quiz_result[2] else "Unknown" 
+                            total_questions = len(self.questions) # Get total questions
+
+                            server_embed = discord.Embed(
+                                title="Quiz Completed", # Slightly updated title
+                                description=f"{self.user.mention} has completed: **{quiz_name}**",
+                                color=discord.Color.gold()
+                            )
+                            server_embed.add_field(
+                                name="Score",
+                                value=f"**{self.score}** points",
+                                inline=True
+                            )
+                            server_embed.add_field(
+                                name="Questions",
+                                value=f"Completed {total_questions} questions",
+                                inline=True
+                            )
+                            server_embed.add_field(
+                                name="Created by",
+                                value=creator_username,
+                                inline=True
+                            )
+                            
+                            await results_channel.send(embed=server_embed) # Send the reverted embed
+                            logger.info(f"Reported DM quiz result for user {self.user_id} to channel {results_channel_id}")
+                         else:
+                             logger.warning(f"Missing send_messages permission in results channel {results_channel_id} for guild {self.guild_id}")
+                    else:
+                        logger.warning(f"Could not find results channel {results_channel_id} for guild {self.guild_id}, or it's not a text channel.")
+                        
+                except ValueError:
+                    logger.error(f"Invalid non-integer results channel ID '{results_channel_id_str}' found for guild {self.guild_id}")
+                except discord.Forbidden:
+                     logger.error(f"Permission error sending result to channel {results_channel_id} for guild {self.guild_id}")
+                except Exception as e:
+                    logger.error(f"Error sending result to channel for guild {self.guild_id}: {e}", exc_info=True)
+            else:
+                 logger.info(f"No results channel configured for guild {self.guild_id}. Skipping channel report.")
+                 
         except Exception as e:
-            logger.error(f"Error ending quiz: {e}")
-            # Even if there was an error, we should try to record the score
+            logger.error(f"Error during end_quiz for user {self.user_id}: {e}")
+            # Attempt to notify user of error
             try:
-                await record_user_score(self.user_id, self.user_name, self.quiz_id, self.score)
-                logger.info(f"Recorded score after error for {self.user_name}: {self.score} points in quiz {self.quiz_id}")
+                await self.user.send("An error occurred while finalizing your quiz score.")
             except:
                 pass
+        finally:
+            # Clean up active quiz status from queue manager
+            # (Ideally, the queue manager should handle this based on completion/timeout)
+             async with self.bot.get_cog("QuizPlayCog").queue.lock: # Access queue lock safely
+                if self.user_id in self.bot.get_cog("QuizPlayCog").queue.active_quizzes:
+                    del self.bot.get_cog("QuizPlayCog").queue.active_quizzes[self.user_id]
+                    logger.debug(f"Cleaned up active quiz status for user {self.user_id}")
 
     async def auto_end_quiz(self, timeout_seconds):
         """Automatically end the quiz after a timeout period if not ended by user"""

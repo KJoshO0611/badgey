@@ -249,49 +249,70 @@ async def setup_db() -> None:
         conn = await get_db_connection()
         try:
             async with conn.cursor() as cursor:
-                # Create tables if they don't exist
+                # Create quizzes table
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS quizzes (
-                        quiz_id INT AUTO_INCREMENT PRIMARY KEY,
-                        quiz_name TEXT NOT NULL,
-                        creator_id BIGINT NOT NULL,
-                        creation_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
+                        id INT AUTO_INCREMENT PRIMARY KEY,
+                        name VARCHAR(255) NOT NULL,
+                        creator_id BIGINT UNSIGNED NOT NULL,
+                        creator_username VARCHAR(255),
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
                 """)
-
+                
+                # Create questions table
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS questions (
-                        question_id INT AUTO_INCREMENT PRIMARY KEY,
+                        id INT AUTO_INCREMENT PRIMARY KEY,
                         quiz_id INT NOT NULL,
                         question_text TEXT NOT NULL,
                         options JSON NOT NULL,
-                        correct_answer TEXT NOT NULL,
-                        score INT NOT NULL,
+                        correct_answer VARCHAR(255) NOT NULL,
+                        score INT DEFAULT 10,
                         explanation TEXT,
-                        FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
-                    )
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (quiz_id) REFERENCES quizzes(id) ON DELETE CASCADE
+                    );
                 """)
-
+                
+                # Create user_scores table
                 await cursor.execute("""
                     CREATE TABLE IF NOT EXISTS user_scores (
                         id INT AUTO_INCREMENT PRIMARY KEY,
-                        user_id BIGINT NOT NULL,
-                        user_name VARCHAR(255) NOT NULL,
+                        user_id BIGINT UNSIGNED NOT NULL,
+                        user_name VARCHAR(255),
                         quiz_id INT NOT NULL,
                         score INT NOT NULL,
-                        completion_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                        UNIQUE KEY unique_user_quiz (user_id, quiz_id),
-                        INDEX idx_quiz_id (quiz_id),
-                        FOREIGN KEY (quiz_id) REFERENCES quizzes(quiz_id) ON DELETE CASCADE
-                    )
+                        compeltion_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        FOREIGN KEY (quiz_id) REFERENCES quizzes(id) ON DELETE CASCADE,
+                        UNIQUE KEY user_quiz_unique (user_id, quiz_id)
+                    );
                 """)
-            logger.info("Database setup completed successfully")
+
+                # Create guild_settings table
+                await cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS guild_settings (
+                        guild_id BIGINT UNSIGNED NOT NULL,
+                        setting_key VARCHAR(255) NOT NULL,
+                        setting_value VARCHAR(1024),
+                        PRIMARY KEY (guild_id, setting_key)
+                    );
+                """)
+                
+                logger.info("Database tables checked/created successfully")
+                
+        except Exception as e:
+            logger.error(f"Error setting up database tables: {str(e)}")
+            raise DatabaseConnectionError(f"Error setting up tables: {str(e)}")
         finally:
-            if conn:
-                await release_connection(conn)
+            await release_connection(conn)
+            
+    except DatabaseConnectionError as e:
+        logger.critical(f"Failed to connect to database for setup: {e}")
+        raise
     except Exception as e:
-        logger.error(f"Failed to setup database: {str(e)}")
-        raise DatabaseConnectionError(f"Failed to setup database: {str(e)}")
+        logger.critical(f"An unexpected error occurred during DB setup: {e}", exc_info=True)
+        raise DatabaseConnectionError(f"Unexpected DB setup error: {e}")
 
 # GET functions
 @timed_cache(seconds=60)
@@ -1016,3 +1037,36 @@ async def execute_transaction(queries: List[Tuple[str, Tuple]]) -> bool:
             except Exception as autocommit_error:
                 logger.error(f"Failed to reset autocommit: {str(autocommit_error)}")
             await release_connection(conn)
+
+# --- Guild Settings Functions --- #
+
+async def set_guild_setting(guild_id: int, setting_key: str, setting_value: str) -> None:
+    """Insert or update a setting for a specific guild."""
+    query = """
+        INSERT INTO guild_settings (guild_id, setting_key, setting_value)
+        VALUES (%s, %s, %s)
+        ON DUPLICATE KEY UPDATE setting_value = VALUES(setting_value)
+    """
+    params = (guild_id, setting_key, setting_value)
+    try:
+        await execute_query(query, params)
+        logger.info(f"Set setting '{setting_key}' for guild {guild_id}")
+    except DatabaseQueryError as e:
+        logger.error(f"Failed to set setting '{setting_key}' for guild {guild_id}: {e}")
+        # Depending on desired behavior, you might re-raise or handle differently
+
+async def get_guild_setting(guild_id: int, setting_key: str) -> Optional[str]:
+    """Retrieve a specific setting for a guild."""
+    query = "SELECT setting_value FROM guild_settings WHERE guild_id = %s AND setting_key = %s"
+    params = (guild_id, setting_key)
+    try:
+        result = await fetch_one(query, params)
+        if result:
+            logger.debug(f"Retrieved setting '{setting_key}' for guild {guild_id}")
+            return result[0] # fetch_one returns a tuple
+        else:
+            logger.debug(f"Setting '{setting_key}' not found for guild {guild_id}")
+            return None
+    except DatabaseQueryError as e:
+        logger.error(f"Failed to retrieve setting '{setting_key}' for guild {guild_id}: {e}")
+        return None # Return None on error to avoid breaking calling code
