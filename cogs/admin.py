@@ -6,6 +6,10 @@ import asyncio
 from config import CONFIG
 from utils.helpers import has_required_role
 from utils.db_utilsv2 import delete_scores
+import datetime
+import typing
+import io
+import csv
 
 logger = logging.getLogger('badgey.Admin')
 
@@ -111,7 +115,7 @@ class AdminCog(commands.Cog):
     async def convo(self, interaction: discord.Interaction, message: str, avatar:str):
         
         if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']):
-            await interaction.response.send_message("Uh-oh! You don’t have permission to use this command! Guess someone’s not in charge here! Hehehe!", delete_after=5)
+            await interaction.response.send_message("Uh-oh! You don't have permission to use this command! Guess someone's not in charge here! Hehehe!", delete_after=5)
             return
        
         try:
@@ -168,7 +172,157 @@ class AdminCog(commands.Cog):
                 
         except Exception as e:
             logger.error(f"Error deleting user scores: {e}")
-            await interaction.response.send_message(f"Oopsie! Something went wrong while deleting scores: {str(e)}", ephemeral=True) 
+            await interaction.response.send_message(f"Oopsie! Something went wrong while deleting scores: {str(e)}", ephemeral=True)
+
+    @app_commands.command(name="get_logs")
+    @app_commands.describe(
+        start_date="Start date for logs (YYYY-MM-DD)",
+        end_date="End date for logs (YYYY-MM-DD)",
+        channel="Optional: Channel to get logs from (defaults to all text channels)"
+    )
+    async def get_logs(self, interaction: discord.Interaction, start_date: str, end_date: str, channel: typing.Optional[discord.TextChannel]):
+        """Fetches chat logs as a CSV file within a specified date range and optional channel."""
+
+        if not has_required_role(interaction.user, CONFIG['REQUIRED_ROLES']):
+            await interaction.response.send_message("Uh-oh! You don't have permission to use this command!", ephemeral=True)
+            return
+
+        # Defer response publicly
+        await interaction.response.defer(ephemeral=False, thinking=True)
+
+        try:
+            # Validate and parse dates
+            try:
+                start_dt = datetime.datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=datetime.timezone.utc)
+                end_dt = datetime.datetime.strptime(end_date, "%Y-%m-%d").replace(hour=23, minute=59, second=59, microsecond=999999, tzinfo=datetime.timezone.utc)
+            except ValueError:
+                await interaction.followup.send("Invalid date format. Please use YYYY-MM-DD.", ephemeral=True)
+                return
+
+            if start_dt > end_dt:
+                await interaction.followup.send("Start date cannot be after end date.", ephemeral=True)
+                return
+
+            all_messages = []
+            target_channels = []
+            guild = interaction.guild
+
+            if channel:
+                if isinstance(channel, discord.TextChannel):
+                    target_channels.append(channel)
+                else:
+                    await interaction.followup.send("Invalid channel type specified.", ephemeral=True)
+                    return
+            else:
+                # Fetch from all text channels the bot can see
+                target_channels = [ch for ch in guild.text_channels if ch.permissions_for(guild.me).read_message_history]
+
+            if not target_channels:
+                 await interaction.followup.send("No accessible text channels found to fetch logs from.", ephemeral=True)
+                 return
+
+            processed_count = 0
+            total_channels = len(target_channels)
+
+            for current_channel in target_channels:
+                processed_count += 1
+                logger.info(f"Processing channel {processed_count}/{total_channels}: {current_channel.name} ({current_channel.id})")
+                # Fetch logs from the main channel
+                channel_messages = await self._fetch_and_format_logs(current_channel, start_dt, end_dt)
+                all_messages.extend(channel_messages)
+
+                # Fetch logs from active threads in the channel
+                try:
+                    # Fetch all active threads in the guild
+                    guild_threads = await guild.active_threads()
+                    # Filter threads belonging to the current channel
+                    threads = [t for t in guild_threads if t.parent_id == current_channel.id]
+
+                    for thread in threads:
+                        if thread.permissions_for(guild.me).read_message_history:
+                           logger.info(f"Processing thread: {thread.name} ({thread.id}) in channel {current_channel.name}")
+                           thread_messages = await self._fetch_and_format_logs(thread, start_dt, end_dt)
+                           all_messages.extend(thread_messages)
+                        else:
+                           logger.warning(f"Skipping thread {thread.name} due to missing permissions.")
+                except discord.Forbidden:
+                    logger.warning(f"Missing permissions to list threads in {current_channel.name}")
+                except discord.HTTPException as e:
+                     logger.error(f"HTTP error fetching threads for {current_channel.name}: {e}")
+
+            # Sort messages chronologically (optional, history should be mostly ordered)
+            all_messages.sort(key=lambda x: datetime.datetime.strptime(x['Timestamp'], "%Y-%m-%d %H:%M:%S UTC"))
+
+            # Prepare CSV file
+            if not all_messages:
+                await interaction.followup.send("No logs found for the specified criteria.", ephemeral=True)
+                return
+
+            output = io.StringIO()
+            headers = ["Timestamp", "Author", "AuthorID", "Channel", "Thread", "Content", "Reactions"]
+            writer = csv.DictWriter(output, fieldnames=headers)
+            writer.writeheader()
+            writer.writerows(all_messages)
+
+            output.seek(0)
+            csv_content = output.getvalue()
+            output.close()
+
+            log_filename = f"logs_{start_date}_to_{end_date}_{channel.name if channel else 'all'}.csv"
+            log_bytes = csv_content.encode('utf-8')
+
+            # Check file size (Discord limit is 25MB)
+            if len(log_bytes) > 25 * 1024 * 1024:
+                 # Try sending a message indicating the size issue first
+                 await interaction.followup.send("Log file is too large (>25MB) to upload. Please narrow your date range or specify a channel.", ephemeral=True)
+                 return # Stop before attempting to send the large file
+
+            file = discord.File(io.BytesIO(log_bytes), filename=log_filename)
+            await interaction.followup.send("Here are the logs you requested!", file=file)
+
+        except discord.errors.NotFound:
+             await interaction.followup.send("Interaction expired or could not be found.", ephemeral=True)
+        except discord.Forbidden as e:
+            logger.error(f"Permission error in get_logs: {e}")
+            await interaction.followup.send(f"I seem to be missing permissions to perform this action. Error: {e}", ephemeral=True)
+        except Exception as e:
+            logger.error(f"Error fetching logs: {e}", exc_info=True)
+            # Check if the interaction has already been responded to
+            try:
+                 await interaction.followup.send(f"Oops! Something went wrong while fetching logs: {str(e)}", ephemeral=True)
+            except discord.errors.InteractionResponded:
+                 logger.warning("Interaction already responded to when trying to send error message.")
+                 # Optionally send to a log channel or print
+                 print(f"Error in get_logs for interaction {interaction.id}: {e}")
+
+    # Helper function to fetch and format logs from a channel/thread
+    async def _fetch_and_format_logs(self, source, start_dt, end_dt):
+        messages_data = []
+        channel_name = source.name
+        is_thread = isinstance(source, discord.Thread)
+        thread_name = source.name if is_thread else None
+        parent_channel_name = source.parent.name if is_thread else channel_name
+
+        try:
+            async for message in source.history(limit=None, after=start_dt, before=end_dt, oldest_first=True):
+                # Format reactions
+                reaction_str = ", ".join([f"{reaction.emoji}: {reaction.count}" for reaction in message.reactions])
+                reaction_str = f"[{reaction_str}]" if reaction_str else ""
+
+                messages_data.append({
+                    "Timestamp": message.created_at.strftime("%Y-%m-%d %H:%M:%S UTC"),
+                    "Author": str(message.author),
+                    "AuthorID": message.author.id,
+                    "Channel": parent_channel_name,
+                    "Thread": thread_name,
+                    "Content": message.clean_content,
+                    "Reactions": reaction_str
+                })
+        except discord.Forbidden:
+            logger.warning(f"Missing permissions to read history for {channel_name}{f' (thread in {parent_channel_name})' if is_thread else ''}")
+        except discord.HTTPException as e:
+             logger.error(f"HTTP error fetching history for {channel_name}{f' (thread in {parent_channel_name})' if is_thread else ''}: {e}")
+        return messages_data
 
 async def setup(bot):
     await bot.add_cog(AdminCog(bot))
