@@ -601,6 +601,110 @@ class EphemeralQuizView(discord.ui.View):
                 
                 await asyncio.sleep(2 ** retries)
 
+    async def process_timeout(self, message, question_instance_id):
+        """Handle question timeout"""
+        async with self.lock:
+            try:
+                # Check if we're still on the same question and quiz hasn't ended
+                if self._is_ended or self.index >= len(self.questions):
+                    logger.debug(f"Timeout ignored: quiz has ended or question changed")
+                    return
+
+                current_question = self.questions[self.index]
+                correct_answer = current_question[4]
+
+                # Create timeout embed
+                embed = discord.Embed(
+                    title=f"Time's Up! ⌛",
+                    description=f"Question {self.index + 1}/{len(self.questions)}",
+                    color=discord.Color.red()
+                )
+
+                # Add the question text
+                embed.add_field(
+                    name="Question",
+                    value=current_question[2],
+                    inline=False
+                )
+
+                # Add the correct answer
+                embed.add_field(
+                    name="Correct Answer",
+                    value=f"The correct answer was: {correct_answer}",
+                    inline=False
+                )
+
+                # Add explanation if available
+                if len(current_question) > 6 and current_question[6]:
+                    embed.add_field(
+                        name="Explanation",
+                        value=current_question[6],
+                        inline=False
+                    )
+
+                # Update footer with question ID
+                embed.set_footer(text=f"ID: {question_instance_id}")
+
+                # Disable all buttons
+                for child in self.children:
+                    if isinstance(child, discord.ui.Button):
+                        child.disabled = True
+
+                # Add next question button if not the last question
+                is_last_question = self.index == len(self.questions) - 1
+                if is_last_question:
+                    end_button = discord.ui.Button(label="End Quiz", style=discord.ButtonStyle.primary)
+                    
+                    async def end_callback(end_interaction):
+                        if end_interaction.user.id != self.user_id:
+                            await end_interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                            return
+                        
+                        await end_interaction.response.defer()
+                        await self.end_quiz()
+                    
+                    end_button.callback = end_callback
+                    self.add_item(end_button)
+                else:
+                    next_button = discord.ui.Button(label="Next Question", style=discord.ButtonStyle.primary)
+                    
+                    async def next_callback(next_interaction):
+                        if next_interaction.user.id != self.user_id:
+                            await next_interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                            return
+                        
+                        await next_interaction.response.defer()
+                        self.index += 1
+                        self.transitioning = False
+                        await self.show_question()
+                    
+                    next_button.callback = next_callback
+                    self.add_item(next_button)
+
+                # Update the message
+                try:
+                    await message.edit(embed=embed, view=self)
+                    
+                    # Start auto-end timer if this is the last question
+                    if is_last_question:
+                        self.auto_end_timer = asyncio.create_task(self.auto_end_quiz(120))
+                except Exception as e:
+                    logger.error(f"Error updating message after timeout: {e}")
+
+            except Exception as e:
+                logger.error(f"Error in process_timeout: {e}", exc_info=True)
+                self.transitioning = False
+                # Try to move to next question if possible
+                try:
+                    if not self._is_ended:
+                        self.index += 1
+                        if self.index < len(self.questions):
+                            await self.show_question()
+                        else:
+                            await self.end_quiz()
+                except Exception as recovery_error:
+                    logger.error(f"Failed to recover from timeout error: {recovery_error}")
+
 class EphemeralQuizButton(discord.ui.Button):
     """Button for ephemeral quiz answers with error handling"""
     def __init__(self, key, question_data, quiz_view):

@@ -4,10 +4,13 @@ import logging
 import asyncio
 import time
 import json
+import traceback
 from config import CONFIG
 from utils.db_utilsv2 import get_quiz_questions, record_user_score, get_quiz_name
 
+# Enhance logging configuration
 logger = logging.getLogger('badgey.solo_quiz_dm')
+logger.setLevel(logging.DEBUG)  # Set to DEBUG during troubleshooting
 
 class QuizQueue:
     """Manages a queue of users waiting to take quizzes with rate limiting"""
@@ -64,7 +67,7 @@ class QuizQueue:
                                 if user_id in self.active_quizzes:
                                     del self.active_quizzes[user_id]
                         except Exception as e:
-                            logger.error(f"Error starting quiz for user {user_id}: {e}")
+                            logger.error(f"Error starting quiz for user {user_id}: {e}", exc_info=True)
                             try:
                                 await user.send(f"Sorry, there was an error starting your quiz: {str(e)}")
                             except:
@@ -82,7 +85,7 @@ class QuizQueue:
                         del self.active_quizzes[uid]
                 
             except Exception as e:
-                logger.error(f"Error processing quiz queue: {e}")
+                logger.error(f"Error processing quiz queue: {e}", exc_info=True)
             
             # Check the queue every 5 seconds
             await asyncio.sleep(5)
@@ -106,7 +109,9 @@ class DMQuizView:
         self.view = None
         self.answered = False  # Track if the current question has been answered
         self._quiz_ended = False  # Flag to track if quiz has been ended
+        self._quiz_ending_in_progress = False  # New flag to prevent overlapping end processes
         self._auto_end_task = None  # Store the auto-end task for cancellation
+        self._score_recorded = False  # New flag to track if score has been recorded
     
     async def initialize(self, quiz_id):
         """Initialize the quiz by loading questions"""
@@ -156,40 +161,56 @@ class DMQuizView:
                 return False
                 
         except Exception as e:
-            logger.error(f"Failed to initialize quiz: {e}")
+            logger.error(f"Failed to initialize quiz: {e}", exc_info=True)
             return False
     
     async def run_quiz(self):
         """Run the entire quiz as a background task"""
         # Wait for user to start the quiz
-        while not self.is_running:
-            await asyncio.sleep(1)
-        
         try:
+            timeout_counter = 0
+            while not self.is_running and timeout_counter < 300:  # 5 minute max wait
+                await asyncio.sleep(1)
+                timeout_counter += 1
+                
+            if timeout_counter >= 300:
+                logger.warning(f"Quiz {self.quiz_instance_id} timed out waiting for user to start")
+                await self.user.send("Quiz start timed out. Please try again later.")
+                return
+            
             # Start showing questions
             for i in range(len(self.questions)):
+                if not self.is_running:  # Check if quiz was terminated
+                    break
+                    
                 self.current_index = i
                 
                 # Show current question
                 await self.show_question()
                 
                 # Wait for this question to complete before moving to the next one
-                while self.current_index == i and self.is_running:
+                question_timeout = 0
+                while self.current_index == i and self.is_running and question_timeout < (self.timer_duration * 2):
                     await asyncio.sleep(0.5)
+                    question_timeout += 0.5
                 
                 # If quiz was terminated, break out
                 if not self.is_running:
                     break
                     
-            # All questions completed
+            # All questions completed or quiz terminated
             if self.is_running:
                 await self.end_quiz()
+                
         except Exception as e:
-            logger.error(f"Error running quiz: {e}")
+            logger.error(f"Error running quiz: {e}", exc_info=True)
             try:
                 await self.user.send("Sorry, there was an error running your quiz. Please try again later.")
-            except:
-                pass
+                # Attempt to record score even on error
+                if not self._score_recorded:
+                    await self.record_score_safely()
+            except Exception as dm_error:
+                logger.error(f"Failed to send error message: {dm_error}")
     
     async def show_question(self):
         """Display the current question to the user via DM"""
@@ -300,9 +321,12 @@ class DMQuizView:
             asyncio.create_task(self.run_timer(self.current_message, embed, self.current_index, question_instance_id))
             
         except Exception as e:
-            logger.error(f"Error showing question: {e}")
+            logger.error(f"Error showing question: {e}", exc_info=True)
             try:
                 await self.user.send(f"Error showing question: {str(e)}")
+                # Try to move to the next question despite error
+                self.current_index += 1
+                self.is_running = True
             except:
                 pass
     
@@ -377,15 +401,14 @@ class DMQuizView:
                         end_button.callback = end_callback
                         next_view.add_item(end_button)
                         
-                        # Add message about auto-ending
+                        # MODIFIED: Removed auto-ending message
                         embed.add_field(
                             name="Quiz Completion",
-                            value="This is the final question. Press 'End Quiz' to see your results. The quiz will automatically end in 60 seconds.",
+                            value="This is the final question. Press 'End Quiz' to see your results.",
                             inline=False
                         )
                         
-                        # Create a task to automatically end the quiz after timeout
-                        self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
+                        # REMOVED: self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
                     else:
                         # Add Next Question button for non-last questions
                         next_view = discord.ui.View()
@@ -425,7 +448,7 @@ class DMQuizView:
                         pass
             
         except Exception as e:
-            logger.error(f"Error in timer: {e}")
+            logger.error(f"Error in timer: {e}", exc_info=True)
         
     async def process_answer(self, message, chosen_answer, correct_answer, max_score, start_time):
         """Process a user's answer"""
@@ -519,15 +542,14 @@ class DMQuizView:
                 end_button.callback = end_callback
                 new_view.add_item(end_button)
                 
-                # Set timeout to automatically end the quiz after 60 seconds
+                # REMOVED: Auto-end quiz timeout message and task
                 embed.add_field(
                     name="Quiz Completion",
-                    value="This is the final question. Press 'End Quiz' to see your results. The quiz will automatically end in 60 seconds.",
+                    value="This is the final question. Press 'End Quiz' to see your results.",
                     inline=False
                 )
                 
-                # Create a task to automatically end the quiz after timeout
-                self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
+                # REMOVED: self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
                 
             else:
                 # Add next button for non-last questions
@@ -569,7 +591,7 @@ class DMQuizView:
                 await self.user.send("Your previous question couldn't be updated. Here's the result:", embed=embed, view=new_view)
             
         except Exception as e:
-            logger.error(f"Error processing answer: {e}")
+            logger.error(f"Error processing answer: {e}", exc_info=True)
             try:
                 # Send a new message as fallback
                 await self.user.send(f"There was an error processing your answer, but we've recorded it. Moving to the next question.")
@@ -578,28 +600,90 @@ class DMQuizView:
             except:
                 pass
     
+    async def record_score_safely(self):
+        """Safely record the user's score to the database with retries"""
+        if hasattr(self, '_score_recorded') and self._score_recorded:
+            logger.info(f"Score for {self.user_id} in quiz {self.quiz_id} already recorded, skipping")
+            return True
+                
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                username = self.user_name
+                logger.info(f"Attempting to record score (attempt {retry_count+1}/{max_retries})")
+                logger.info(f"Parameters: user_id={self.user_id}, username={username}, quiz_id={self.quiz_id}, score={self.score}")
+                
+                # First check database connection status
+                from utils.db_utilsv2 import pool, initialize_pool
+                if pool is None:
+                    logger.warning("Database pool is None, attempting to initialize")
+                    await initialize_pool()
+                    logger.info("Database pool initialization attempted")
+                
+                # Call record function
+                success = await record_user_score(self.user_id, username, self.quiz_id, self.score)
+                
+                if success:
+                    logger.info(f"Successfully recorded score for {username}: {self.score} points in quiz {self.quiz_id}")
+                    self._score_recorded = True
+                    return True
+                else:
+                    logger.error(f"record_user_score returned False for user {username}")
+                    retry_count += 1
+                    await asyncio.sleep(1)  # Wait before retrying
+                    
+            except Exception as e:
+                retry_count += 1
+                logger.error(f"Error recording quiz score (attempt {retry_count}/{max_retries}): {e}", exc_info=True)
+                
+                # Get more information about the error
+                import traceback
+                logger.error(f"Traceback: {traceback.format_exc()}")
+                
+                await asyncio.sleep(1)  # Wait before retrying
+        
+        logger.critical(f"FAILED TO RECORD SCORE after {max_retries} attempts for user {self.user_id} in quiz {self.quiz_id}")
+        return False
+    
     async def end_quiz(self):
         """End the quiz and show results"""
+        # Use an atomic check-and-set pattern to avoid race conditions
+        if self._quiz_ending_in_progress:
+            logger.info(f"Quiz {self.quiz_instance_id} is already in the process of ending, ignoring duplicate end call")
+            return
+                
+        if self._quiz_ended:
+            logger.info(f"Quiz {self.quiz_instance_id} has already ended, ignoring duplicate end call")
+            return
+        
+        self._quiz_ending_in_progress = True
+        
         try:
-            # Set flag to indicate quiz is finished to prevent other processes from interfering
-            self.is_running = False
-            
-            # Check if we've already ended this quiz
-            if hasattr(self, '_quiz_ended') and self._quiz_ended:
-                logger.info(f"Quiz {self.quiz_instance_id} has already ended, ignoring duplicate end call")
-                return
-            
             # Mark quiz as ended immediately to prevent race conditions
-            self._quiz_ended = True
-            logger.info(f"Marked quiz {self.quiz_instance_id} as ended")
+            self.is_running = False  # Stop quiz activity
             
-            # Cancel any pending auto-end timer
+            # Cancel any pending auto-end timer - keep this in case there are lingering tasks
             if hasattr(self, '_auto_end_task') and self._auto_end_task:
                 self._auto_end_task.cancel()
                 self._auto_end_task = None
                 logger.info(f"Cancelled auto-end task for quiz {self.quiz_instance_id}")
             
-            logger.info(f"Ending quiz {self.quiz_instance_id} for user {self.user_id}")
+            # First, record score - this is most critical
+            logger.info(f"Recording score for quiz {self.quiz_instance_id} for user {self.user_id}")
+            
+            # Add more debug logging for score recording
+            try:
+                # Explicitly import and log database status
+                from utils.db_utilsv2 import pool
+                logger.info(f"Database pool status before recording score: {pool is not None}")
+                
+                score_recorded = await self.record_score_safely()
+                logger.info(f"Score recording result: {score_recorded}")
+            except Exception as db_error:
+                logger.error(f"Error checking database pool: {db_error}", exc_info=True)
+                score_recorded = False
             
             # First, update the last question message if it exists
             if self.current_message:
@@ -616,12 +700,17 @@ class DMQuizView:
                     
                     logger.info(f"Updated final question message for user {self.user_id}")
                 except Exception as e:
-                    logger.error(f"Failed to update last question message: {e}")
+                    logger.error(f"Failed to update last question message: {e}", exc_info=True)
             
             # Get quiz details
-            quiz_result = await get_quiz_name(self.quiz_id)
-            quiz_name = quiz_result[0] if quiz_result else f"Quiz {self.quiz_id}"
-            creator_username = quiz_result[2] if quiz_result and len(quiz_result) > 2 and quiz_result[2] else "Unknown"
+            try:
+                quiz_result = await get_quiz_name(self.quiz_id)
+                quiz_name = quiz_result[0] if quiz_result else f"Quiz {self.quiz_id}"
+                creator_username = quiz_result[2] if quiz_result and len(quiz_result) > 2 and quiz_result[2] else "Unknown"
+            except Exception as e:
+                logger.error(f"Failed to fetch quiz details: {e}", exc_info=True)
+                quiz_name = f"Quiz {self.quiz_id}"
+                creator_username = "Unknown"
             
             # Create results embed for DM
             dm_embed = discord.Embed(
@@ -650,14 +739,23 @@ class DMQuizView:
                 inline=False
             )
             
+            # Add score recording status
+            if not score_recorded:
+                dm_embed.add_field(
+                    name="⚠️ Score Recording",
+                    value="Your score could not be recorded at this time. Please contact an administrator.",
+                    inline=False
+                )
+            
             # Add instance ID to track this specific quiz
-            dm_embed.set_footer(text=f"Quiz ID: {self.quiz_instance_id}")
+            dm_embed.set_footer(text=f"Quiz ID: {self.quiz_instance_id} | Score: {self.score}")
             
             # Send DM results
             try:
                 await self.user.send(content="Quiz finished!", embed=dm_embed)
+                logger.info(f"Sent DM results to user {self.user_id}")
             except Exception as e:
-                logger.error(f"Failed to send final results DM: {e}")
+                logger.error(f"Failed to send final results DM: {e}", exc_info=True)
             
             # Now send results to the server channel
             try:
@@ -690,65 +788,74 @@ class DMQuizView:
                     await channel.send(embed=server_embed)
                     logger.info(f"Reported quiz results for {self.user_name} to channel {self.channel_id}")
             except Exception as e:
-                logger.error(f"Error reporting quiz results to channel: {e}")
-        
-            # Record score in database
-            try:
-                username = self.user_name
-                await record_user_score(self.user_id, username, self.quiz_id, self.score)
-                logger.info(f"Recorded score for {username}: {self.score} points in quiz {self.quiz_id}")
-            except Exception as e:
-                logger.error(f"Error recording quiz score: {e}")
+                logger.error(f"Error reporting quiz results to channel: {e}", exc_info=True)
                 
-        except Exception as e:
-            logger.error(f"Error ending quiz: {e}")
-            # Even if there was an error, we should try to record the score
-            try:
-                await record_user_score(self.user_id, self.user_name, self.quiz_id, self.score)
-                logger.info(f"Recorded score after error for {self.user_name}: {self.score} points in quiz {self.quiz_id}")
-            except:
-                pass
-
-    async def auto_end_quiz(self, timeout_seconds):
-        """Automatically end the quiz after a timeout period if not ended by user"""
-        try:
-            # Immediately check if the quiz has already been ended manually
-            if hasattr(self, '_quiz_ended') and self._quiz_ended:
-                logger.info(f"Quiz {self.quiz_instance_id} was already manually ended, skipping auto-end")
-                return
-                
-            # Wait for the specified timeout period
-            await asyncio.sleep(timeout_seconds)
-            
-            # Check again if the quiz has already been ended manually
-            if hasattr(self, '_quiz_ended') and self._quiz_ended:
-                logger.info(f"Quiz {self.quiz_instance_id} was manually ended during wait period, skipping auto-end")
-                return
-            
-            # Check if we're still on the last question
-            if self.current_index == len(self.questions) - 1:
-                logger.info(f"Auto-ending quiz for user {self.user_id} after {timeout_seconds} second timeout")
-                
-                # Force the quiz to end by setting running to false
-                self.is_running = False
-                
-                # Send a message to the user
-                try:
-                    await self.user.send("The quiz has automatically ended due to inactivity. Here are your results:")
-                except:
-                    logger.error(f"Failed to send auto-end message to user {self.user_id}")
+            # Mark as fully ended only after all steps complete successfully
+            self._quiz_ended = True
+            logger.info(f"Quiz {self.quiz_instance_id} ended successfully")
                     
-                # Directly call end_quiz without any further conditions
-                await self.end_quiz()
-        except asyncio.CancelledError:
-            # Task was cancelled, just exit silently
-            logger.debug(f"Auto-end task was cancelled for quiz {self.quiz_instance_id}")
-            return
         except Exception as e:
-            logger.error(f"Error in auto_end_quiz: {e}")
-            # Try to force end the quiz even if there was an error
+            logger.error(f"Error in end_quiz: {e}", exc_info=True)
+            # Even if there was an error, we should try to record the score if not already done
+            if not hasattr(self, '_score_recorded') or not self._score_recorded:
+                try:
+                    await self.record_score_safely()
+                except Exception as score_e:
+                    logger.error(f"Failed to record score after error: {score_e}", exc_info=True)
+                    
+            # Also try to send a simple completion message if we haven't sent one yet
             try:
-                self.is_running = False
-                await self.end_quiz()
-            except Exception as inner_e:
-                logger.error(f"Failed to force end quiz after error: {inner_e}")
+                if not self._quiz_ended:
+                    await self.user.send(f"Quiz completed! Your final score: **{self.score}** points.")
+            except Exception as msg_e:
+                logger.error(f"Failed to send fallback completion message: {msg_e}", exc_info=True)
+        finally:
+            # Ensure we always clear the ending-in-progress flag to prevent deadlocks
+            self._quiz_ending_in_progress = False
+            # Mark quiz as ended in all cases
+            self._quiz_ended = True
+
+
+    #async def auto_end_quiz(self, timeout_seconds):
+    #    """Automatically end the quiz after a timeout period if not ended by user"""
+    #    try:
+    #        # Immediately check if the quiz has already been ended manually
+    #        if self._quiz_ended or self._quiz_ending_in_progress:
+    ##            logger.info(f"Quiz {self.quiz_instance_id} was already ended or ending, skipping auto-end")
+     #           return
+     #               
+     #       # Wait for the specified timeout period
+     #       await asyncio.sleep(timeout_seconds)
+     #       
+     #       # Check again if the quiz has already been ended manually
+     #       if self._quiz_ended or self._quiz_ending_in_progress:
+     #           logger.info(f"Quiz {self.quiz_instance_id} was ended during wait period, skipping auto-end")
+     #           return
+     #       
+     #       # Check if we're still on the last question
+     #       if self.current_index == len(self.questions) - 1:
+     #          logger.info(f"Auto-ending quiz for user {self.user_id} after {timeout_seconds} second timeout")
+      #          
+       #         # Force the quiz to end by setting running to false
+       #         self.is_running = False
+       #         
+       #         # Send a message to the user
+       ##             await self.user.send("The quiz has automatically ended due to inactivity. Here are your results:")
+         #       except Exception as e:
+         #           logger.error(f"Failed to send auto-end message to user {self.user_id}: {e}", exc_info=True)
+         #           
+         #       # Directly call end_quiz
+        #        await self.end_quiz()
+      #  except asyncio.CancelledError:
+     #       # Task was cancelled, just exit silently
+     #       logger.debug(f"Auto-end task was cancelled for quiz {self.quiz_instance_id}")
+     #       return
+     #   except Exception as e:
+     #       logger.error(f"Error in auto_end_quiz: {e}", exc_info=True)
+     #       # Try to force end the quiz even if there was an error
+     #       try:
+     #           if not self._quiz_ended and not self._quiz_ending_in_progress:
+     #               self.is_running = False
+     #               await self.end_quiz()
+     #       except Exception as inner_e:
+     #           logger.error(f"Failed to force end quiz after auto-end error: {inner_e}", exc_info=True)
