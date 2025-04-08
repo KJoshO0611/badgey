@@ -246,16 +246,16 @@ class EphemeralQuizView(discord.ui.View):
                 # Disable buttons (create a new view with disabled buttons)
                 timed_out_view = discord.ui.View(timeout=None)
                 for item in message.components:
-                     if isinstance(item, discord.ui.ActionRow):
-                         for component in item.children:
-                             if isinstance(component, discord.ui.Button):
-                                 disabled_button = discord.ui.Button(
-                                     label=component.label,
-                                     style=component.style,
-                                     custom_id=component.custom_id, # Keep ID for potential logging?
-                                     disabled=True
-                                 )
-                                 timed_out_view.add_item(disabled_button)
+                    if isinstance(item, discord.ui.ActionRow):
+                        for component in item.children:
+                            if isinstance(component, discord.ui.Button):
+                                disabled_button = discord.ui.Button(
+                                    label=component.label,
+                                    style=component.style,
+                                    custom_id=component.custom_id,
+                                    disabled=True
+                                )
+                                timed_out_view.add_item(disabled_button)
 
                 # Edit the original message
                 if self.latest_response:
@@ -265,12 +265,12 @@ class EphemeralQuizView(discord.ui.View):
                         view=timed_out_view
                     )
                 else:
-                     # Fallback if latest_response isn't set (shouldn't happen ideally)
-                     await self.interaction.edit_original_response(
-                         content=None,
-                         embed=feedback_embed,
-                         view=timed_out_view
-                     )
+                    # Fallback if latest_response isn't set
+                    await self.interaction.edit_original_response(
+                        content=None,
+                        embed=feedback_embed,
+                        view=timed_out_view
+                    )
                 
                 logger.info(f"Processed timeout for question {self.index + 1} for user {self.user_id}")
 
@@ -287,7 +287,7 @@ class EphemeralQuizView(discord.ui.View):
                 logger.error(f"Error processing timeout for user {self.user_id}: {e}", exc_info=True)
                 # Attempt to end quiz gracefully on error
                 if not self._is_ended:
-                     asyncio.create_task(self.end_quiz())
+                    asyncio.create_task(self.end_quiz())
             finally:
                 self.transitioning = False
 

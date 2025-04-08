@@ -272,7 +272,7 @@ class DMQuizView:
                         self.is_running = False
                         
                         # Process the answer
-                        start_time = time.time() - (self.timer_duration - float(embed.footer.text.split()[2]))
+                        start_time = time.time() - (self.timer_duration - int(embed.footer.text.split()[2]))
                         await self.process_answer(
                             interaction.message,
                             btn_key,
@@ -310,124 +310,172 @@ class DMQuizView:
     async def run_timer(self, message, embed, question_index, question_instance_id):
         """Run a timer for the current question"""
         try:
-            # Set initial time
+            start_time = time.time()
             time_left = self.timer_duration
             
-            # Only run timer while question is active and hasn't been answered
-            while time_left > 0 and self.is_running and self.current_index == question_index and not self.answered:
-                # Update timer every 3 seconds or when time is low
-                if time_left % 3 == 0 or time_left <= 5:
-                    embed.set_footer(text=f"Time left: {time_left} seconds ⏳ | Quiz ID: {question_instance_id}")
-                    try:
-                        await message.edit(embed=embed)
-                    except (discord.NotFound, discord.Forbidden):
-                        # Message was deleted or can't be edited
-                        return
+            while time_left > 0 and self.is_running and question_index == self.current_index:
+                # Update the embed footer with remaining time
+                embed.set_footer(text=f"Time left: {int(time_left)} seconds ⏳ | Quiz ID: {question_instance_id}")
                 
+                try:
+                    # Try to edit the message with the updated time
+                    await message.edit(embed=embed)
+                except discord.NotFound:
+                    logger.warning(f"Message not found while updating timer for question {question_index}")
+                    break
+                except discord.Forbidden:
+                    logger.warning(f"Missing permissions to edit message for question {question_index}")
+                    break
+                except Exception as e:
+                    logger.error(f"Error updating timer for question {question_index}: {e}")
+                    break
+                
+                # Wait 1 second before next update
                 await asyncio.sleep(1)
-                time_left -= 1
+                time_left = self.timer_duration - (time.time() - start_time)
             
-                # If the timer ran out and question is still active, process timeout
-                if time_left <= 0 and self.is_running and self.current_index == question_index and not self.answered:
-                    self.is_running = False
-                    self.answered = True
+            # If we exited the loop due to time running out and the question hasn't been answered
+            if time_left <= 0 and self.is_running and question_index == self.current_index and not self.answered:
+                await self.process_timeout(message, embed, question_index, question_instance_id)
+                
+        except Exception as e:
+            logger.error(f"Error in run_timer: {e}")
+
+    async def process_timeout(self, message, embed, question_index, question_instance_id):
+        """Handle when a question times out"""
+        try:
+            # Get the current question data
+            question_data = self.questions[question_index]
+            correct_answer = question_data[4]
+            max_score = question_data[5]
+            explanation = question_data[6] if len(question_data) > 6 else None
+            
+            # Create feedback embed
+            feedback_embed = discord.Embed(
+                title=f"Question {question_index + 1}/{len(self.questions)} - Time's Up!",
+                description="⏰ Time's up! Here's the correct answer:",
+                color=discord.Color.red()
+            )
+            
+            # Add the question text
+            feedback_embed.add_field(
+                name="Question",
+                value=question_data[2],
+                inline=False
+            )
+            
+            # Add the correct answer
+            feedback_embed.add_field(
+                name="Correct Answer",
+                value=correct_answer,
+                inline=False
+            )
+            
+            # Add explanation if available
+            if explanation:
+                feedback_embed.add_field(
+                    name="Explanation",
+                    value=explanation,
+                    inline=False
+                )
+            
+            # Add score information
+            feedback_embed.add_field(
+                name="Score",
+                value=f"Time's up! You scored 0/{max_score} points for this question.",
+                inline=False
+            )
+            
+            # Create a new view
+            new_view = discord.ui.View()
+            
+            # Check if this is the last question
+            is_last_question = question_index == len(self.questions) - 1
+            
+            if is_last_question:
+                # Add End Quiz button for the last question
+                end_button = discord.ui.Button(
+                    label="End Quiz", 
+                    style=discord.ButtonStyle.success,
+                    custom_id=f"end_{question_instance_id}"
+                )
+                
+                async def end_callback(interaction):
+                    if interaction.user.id != self.user_id:
+                        await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                        return
                     
-                    # Show timeout message
-                    embed.add_field(
-                        name="Time's up!",
-                        value=f"The correct answer was {self.questions[question_index][4]}",
-                        inline=False
-                    )
-                    
-                    # Disable buttons
-                    if self.view:
-                        for item in self.view.children:
-                            if isinstance(item, discord.ui.Button):
-                                item.disabled = True
-                    
-                    # Check if this is the last question
-                    is_last_question = question_index == len(self.questions) - 1
-                    
-                    if is_last_question:
-                        # Add End Quiz button
-                        next_view = discord.ui.View()
-                        end_button = discord.ui.Button(
-                            label="End Quiz", 
-                            style=discord.ButtonStyle.success,
-                            custom_id=f"end_{question_instance_id}"
+                    # Verify this is for the current question
+                    interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
+                    if question_instance_id != interaction_id:
+                        await interaction.response.send_message(
+                            "This button is no longer active.",
+                            ephemeral=True
                         )
-                        
-                        async def end_callback(interaction):
-                            if interaction.user.id != self.user_id:
-                                await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
-                                return
-                            
-                            # Verify this is for the current question
-                            interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
-                            if question_instance_id != interaction_id:
-                                await interaction.response.send_message(
-                                    "This button is no longer active.",
-                                    ephemeral=True
-                                )
-                                return
-                            
-                            await interaction.response.defer()
-                            # End the quiz
-                            await self.end_quiz()
-                        
-                        end_button.callback = end_callback
-                        next_view.add_item(end_button)
-                        
-                        # Add message about auto-ending
-                        embed.add_field(
-                            name="Quiz Completion",
-                            value="This is the final question. Press 'End Quiz' to see your results. The quiz will automatically end in 60 seconds.",
-                            inline=False
-                        )
-                        
-                        # Create a task to automatically end the quiz after timeout
-                        self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
-                    else:
-                        # Add Next Question button for non-last questions
-                        next_view = discord.ui.View()
-                        next_button = discord.ui.Button(
-                            label="Next Question", 
-                            style=discord.ButtonStyle.primary,
-                            custom_id=f"next_{question_instance_id}"
-                        )
-                        
-                        async def next_callback(interaction):
-                            if interaction.user.id != self.user_id:
-                                await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
-                                return
-                            
-                            # Verify this is for the current question
-                            interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
-                            if question_instance_id != interaction_id:
-                                await interaction.response.send_message(
-                                    "This button is no longer active.",
-                                    ephemeral=True
-                                )
-                                return
-                            
-                            await interaction.response.defer()
-                            # Move to next question
-                            self.is_running = True
-                            self.current_index += 1
-                            # Add this line to explicitly trigger the next question
-                            asyncio.create_task(self.show_question())
-                        
-                        next_button.callback = next_callback
-                        next_view.add_item(next_button)
+                        return
                     
-                    try:
-                        await message.edit(embed=embed, view=next_view)
-                    except (discord.NotFound, discord.Forbidden):
-                        pass
+                    await interaction.response.defer()
+                    # End the quiz
+                    await self.end_quiz()
+                
+                end_button.callback = end_callback
+                new_view.add_item(end_button)
+                
+                # Add message about auto-ending
+                feedback_embed.add_field(
+                    name="Quiz Completion",
+                    value="This is the final question. Press 'End Quiz' to see your results. The quiz will automatically end in 60 seconds.",
+                    inline=False
+                )
+                
+                # Create a task to automatically end the quiz after timeout
+                self._auto_end_task = asyncio.create_task(self.auto_end_quiz(60))
+            else:
+                # Add Next Question button for non-last questions
+                next_button = discord.ui.Button(
+                    label="Next Question", 
+                    style=discord.ButtonStyle.primary,
+                    custom_id=f"next_{question_instance_id}"
+                )
+                
+                async def next_callback(interaction):
+                    if interaction.user.id != self.user_id:
+                        await interaction.response.send_message("This quiz is not for you!", ephemeral=True)
+                        return
+                    
+                    # Verify this is for the current question
+                    interaction_id = interaction.data.get('custom_id', '').split('_', 1)[1]
+                    if question_instance_id != interaction_id:
+                        await interaction.response.send_message(
+                            "This button is no longer active.",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    await interaction.response.defer()
+                    # Move to next question
+                    self.is_running = True
+                    self.current_index += 1
+                    # Add this line to explicitly trigger the next question
+                    asyncio.create_task(self.show_question())
+                
+                next_button.callback = next_callback
+                new_view.add_item(next_button)
+            
+            # Update the message with the feedback embed and buttons
+            await message.edit(embed=feedback_embed, view=new_view)
+            
+            # Mark the question as answered
+            self.answered = True
+            
+            # Don't automatically move to next question - wait for button press
             
         except Exception as e:
-            logger.error(f"Error in timer: {e}")
-        
+            logger.error(f"Error in process_timeout: {e}")
+            # If there's an error, still try to move to the next question if it's not the last one
+            if question_index != len(self.questions) - 1:
+                self.current_index += 1
+
     async def process_answer(self, message, chosen_answer, correct_answer, max_score, start_time):
         """Process a user's answer"""
         try:
