@@ -212,6 +212,85 @@ class EphemeralQuizView(discord.ui.View):
         
         return False
 
+    async def process_timeout(self, message, question_instance_id):
+        """Handles the logic when a question timer runs out."""
+        async with self.lock:
+            logger.debug(f"Processing timeout for {question_instance_id} for user {self.user_id}")
+            # Check if quiz ended or question already advanced
+            expected_instance_id = f"{self.message_id}_{self.index}"
+            if self._is_ended or question_instance_id != expected_instance_id:
+                logger.debug(f"Timeout ignored: Quiz ended ({self._is_ended}) or index mismatch (current: {self.index}, expected_id: {expected_instance_id}, timed_out_id: {question_instance_id})")
+                return
+
+            # Prevent button clicks during processing
+            if self.transitioning:
+                logger.debug("Timeout ignored: Transition already in progress.")
+                return
+            self.transitioning = True
+
+            try:
+                # Get question details
+                question_data = self.questions[self.index]
+                correct_answer = question_data[4]
+                explanation = question_data[6]
+
+                # Create feedback embed
+                feedback_embed = discord.Embed(
+                    title=f"Question {self.index + 1} - Time's Up!",
+                    description=f"The correct answer was: **{correct_answer}**",
+                    color=discord.Color.orange()
+                )
+                if explanation:
+                    feedback_embed.add_field(name="Explanation", value=explanation, inline=False)
+
+                # Disable buttons (create a new view with disabled buttons)
+                timed_out_view = discord.ui.View(timeout=None)
+                for item in message.components:
+                     if isinstance(item, discord.ui.ActionRow):
+                         for component in item.children:
+                             if isinstance(component, discord.ui.Button):
+                                 disabled_button = discord.ui.Button(
+                                     label=component.label,
+                                     style=component.style,
+                                     custom_id=component.custom_id, # Keep ID for potential logging?
+                                     disabled=True
+                                 )
+                                 timed_out_view.add_item(disabled_button)
+
+                # Edit the original message
+                if self.latest_response:
+                    await self.latest_response.edit(
+                        content=None,
+                        embed=feedback_embed, 
+                        view=timed_out_view
+                    )
+                else:
+                     # Fallback if latest_response isn't set (shouldn't happen ideally)
+                     await self.interaction.edit_original_response(
+                         content=None,
+                         embed=feedback_embed,
+                         view=timed_out_view
+                     )
+                
+                logger.info(f"Processed timeout for question {self.index + 1} for user {self.user_id}")
+
+                # Move to the next question or end
+                self.index += 1
+                if self.index < len(self.questions):
+                    await asyncio.sleep(2) # Brief pause before next question
+                    asyncio.create_task(self.show_question())
+                else:
+                    await asyncio.sleep(2) # Brief pause before ending
+                    asyncio.create_task(self.end_quiz())
+
+            except Exception as e:
+                logger.error(f"Error processing timeout for user {self.user_id}: {e}", exc_info=True)
+                # Attempt to end quiz gracefully on error
+                if not self._is_ended:
+                     asyncio.create_task(self.end_quiz())
+            finally:
+                self.transitioning = False
+
     async def end_quiz(self):
         """End the quiz and show results"""
         try:
