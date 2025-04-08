@@ -628,106 +628,81 @@ class DMQuizView:
                 pass
     
     async def end_quiz(self):
-        """End the quiz, calculate score, send results to user and report to results channel."""
-        if self._quiz_ended:
-            return # Avoid ending multiple times
-        self._quiz_ended = True
-        self.is_running = False
-        
-        # Cancel any pending auto-end task
-        if self._auto_end_task:
-            self._auto_end_task.cancel()
-        
+        """End the quiz and show final results"""
         try:
-            # Get quiz name for reporting
-            quiz_result = await get_quiz_name(self.quiz_id)
-            quiz_name = quiz_result[0] if quiz_result else f"Quiz {self.quiz_id}"
+            # Cancel any pending auto-end task
+            if hasattr(self, '_auto_end_task') and self._auto_end_task:
+                self._auto_end_task.cancel()
+                self._auto_end_task = None
             
-            # Record score in database
-            await record_user_score(self.user_id, self.user_name, self.quiz_id, self.score)
+            # Mark quiz as ended
+            self.is_running = False
+            self._quiz_ended = True
             
-            # Send final score message to user via DM
-            final_message = (
-                f"\n**Quiz Finished!**\n\n"
-                f"**Quiz:** {quiz_name}\n"
-                f"**Your Score:** {self.score}"
+            # Calculate final score
+            total_questions = len(self.questions)
+            total_possible_score = sum(q[5] for q in self.questions)  # Sum of all max_scores
+            
+            # Create final results embed
+            embed = discord.Embed(
+                title="Quiz Complete!",
+                description=f"Your final score: {self.score}/{total_possible_score}",
+                color=discord.Color.green()
             )
-            if self.current_message and isinstance(self.current_message, discord.Message):
-                await self.current_message.edit(content=final_message, view=None, embed=None)
+            
+            # Add score breakdown
+            embed.add_field(
+                name="Score Breakdown",
+                value=f"Questions: {total_questions}\n"
+                      f"Total Possible Points: {total_possible_score}\n"
+                      f"Your Score: {self.score}\n"
+                      f"Percentage: {(self.score/total_possible_score)*100:.1f}%",
+                inline=False
+            )
+            
+            # Add performance message
+            if self.score == total_possible_score:
+                embed.add_field(
+                    name="Performance",
+                    value="Perfect score! 🎉",
+                    inline=False
+                )
+            elif self.score >= total_possible_score * 0.8:
+                embed.add_field(
+                    name="Performance",
+                    value="Excellent job! 👏",
+                    inline=False
+                )
+            elif self.score >= total_possible_score * 0.6:
+                embed.add_field(
+                    name="Performance",
+                    value="Good work! 👍",
+                    inline=False
+                )
             else:
-                # If message somehow got lost, send a new one
-                await self.user.send(final_message)
+                embed.add_field(
+                    name="Performance",
+                    value="Keep practicing! You'll get better! 💪",
+                    inline=False
+                )
             
-            logger.info(f"Quiz {self.quiz_id} ended for user {self.user_id}. Final score: {self.score}")
+            # Send final results
+            await self.user.send(embed=embed)
             
-            # --- Report results to guild channel --- #
-            results_channel_id_str = await get_guild_setting(self.guild_id, 'quiz_results_channel_id')
-            
-            if results_channel_id_str:
-                try:
-                    results_channel_id = int(results_channel_id_str)
-                    results_channel = self.bot.get_channel(results_channel_id)
-                    
-                    if results_channel and isinstance(results_channel, discord.TextChannel):
-                         # Check permissions before sending
-                         if results_channel.permissions_for(results_channel.guild.me).send_messages:
-                            # Revert embed format to the previous style
-                            # Ensure quiz_result includes creator username, adjust if needed based on get_quiz_name return value
-                            creator_username = quiz_result[2] if len(quiz_result) > 2 and quiz_result[2] else "Unknown" 
-                            total_questions = len(self.questions) # Get total questions
-
-                            server_embed = discord.Embed(
-                                title="Quiz Completed", # Slightly updated title
-                                description=f"{self.user.mention} has completed: **{quiz_name}**",
-                                color=discord.Color.gold()
-                            )
-                            server_embed.add_field(
-                                name="Score",
-                                value=f"**{self.score}** points",
-                                inline=True
-                            )
-                            server_embed.add_field(
-                                name="Questions",
-                                value=f"Completed {total_questions} questions",
-                                inline=True
-                            )
-                            server_embed.add_field(
-                                name="Created by",
-                                value=creator_username,
-                                inline=True
-                            )
-                            
-                            await results_channel.send(embed=server_embed) # Send the reverted embed
-                            logger.info(f"Reported DM quiz result for user {self.user_id} to channel {results_channel_id}")
-                         else:
-                             logger.warning(f"Missing send_messages permission in results channel {results_channel_id} for guild {self.guild_id}")
-                    else:
-                        logger.warning(f"Could not find results channel {results_channel_id} for guild {self.guild_id}, or it's not a text channel.")
-                        
-                except ValueError:
-                    logger.error(f"Invalid non-integer results channel ID '{results_channel_id_str}' found for guild {self.guild_id}")
-                except discord.Forbidden:
-                     logger.error(f"Permission error sending result to channel {results_channel_id} for guild {self.guild_id}")
-                except Exception as e:
-                    logger.error(f"Error sending result to channel for guild {self.guild_id}: {e}", exc_info=True)
-            else:
-                 logger.info(f"No results channel configured for guild {self.guild_id}. Skipping channel report.")
-                 
-        except Exception as e:
-            logger.error(f"Error during end_quiz for user {self.user_id}: {e}")
-            # Attempt to notify user of error
+            # Record the score in the database
             try:
-                await self.user.send("An error occurred while finalizing your quiz score.")
-            except:
-                pass
-        finally:
-            # Clean up active quiz status from queue manager
-            # (Ideally, the queue manager should handle this based on completion/timeout)
-             async with self.bot.get_cog("QuizPlayCog").queue.lock: # Access queue lock safely
-                if self.user_id in self.bot.get_cog("QuizPlayCog").queue.active_quizzes:
-                    del self.bot.get_cog("QuizPlayCog").queue.active_quizzes[self.user_id]
-                    logger.debug(f"Cleaned up active quiz status for user {self.user_id}")
-
+                await record_user_score(
+                    self.user_id,
+                    self.quiz_id,
+                    self.score,
+                    total_possible_score
+                )
+            except Exception as e:
+                logger.error(f"Error recording score for user {self.user_id}: {e}")
+            
+        except Exception as e:
+            logger.error(f"Error ending quiz: {e}")
+    
     async def auto_end_quiz(self, timeout_seconds):
         """Automatically end the quiz after a timeout period if not ended by user"""
         try:
@@ -757,8 +732,71 @@ class DMQuizView:
                 except:
                     logger.error(f"Failed to send auto-end message to user {self.user_id}")
                     
-                # Directly call end_quiz without any further conditions
-                await self.end_quiz()
+                # Calculate final score
+                total_questions = len(self.questions)
+                total_possible_score = sum(q[5] for q in self.questions)  # Sum of all max_scores
+                
+                # Create final results embed
+                embed = discord.Embed(
+                    title="Quiz Complete!",
+                    description=f"Your final score: {self.score}/{total_possible_score}",
+                    color=discord.Color.green()
+                )
+                
+                # Add score breakdown
+                embed.add_field(
+                    name="Score Breakdown",
+                    value=f"Questions: {total_questions}\n"
+                          f"Total Possible Points: {total_possible_score}\n"
+                          f"Your Score: {self.score}\n"
+                          f"Percentage: {(self.score/total_possible_score)*100:.1f}%",
+                    inline=False
+                )
+                
+                # Add performance message
+                if self.score == total_possible_score:
+                    embed.add_field(
+                        name="Performance",
+                        value="Perfect score! 🎉",
+                        inline=False
+                    )
+                elif self.score >= total_possible_score * 0.8:
+                    embed.add_field(
+                        name="Performance",
+                        value="Excellent job! 👏",
+                        inline=False
+                    )
+                elif self.score >= total_possible_score * 0.6:
+                    embed.add_field(
+                        name="Performance",
+                        value="Good work! 👍",
+                        inline=False
+                    )
+                else:
+                    embed.add_field(
+                        name="Performance",
+                        value="Keep practicing! You'll get better! 💪",
+                        inline=False
+                    )
+                
+                # Send final results
+                await self.user.send(embed=embed)
+                
+                # Record the score in the database
+                try:
+                    await record_user_score(
+                        self.user_id,
+                        self.quiz_id,
+                        self.score,
+                        total_possible_score
+                    )
+                    logger.info(f"Successfully recorded auto-end score for user {self.user_id}: {self.score}/{total_possible_score}")
+                except Exception as e:
+                    logger.error(f"Error recording auto-end score for user {self.user_id}: {e}")
+                
+                # Mark quiz as ended
+                self._quiz_ended = True
+                
         except asyncio.CancelledError:
             # Task was cancelled, just exit silently
             logger.debug(f"Auto-end task was cancelled for quiz {self.quiz_instance_id}")
@@ -768,6 +806,17 @@ class DMQuizView:
             # Try to force end the quiz even if there was an error
             try:
                 self.is_running = False
-                await self.end_quiz()
+                self._quiz_ended = True
+                # Still try to record the score
+                try:
+                    total_possible_score = sum(q[5] for q in self.questions)
+                    await record_user_score(
+                        self.user_id,
+                        self.quiz_id,
+                        self.score,
+                        total_possible_score
+                    )
+                except Exception as inner_e:
+                    logger.error(f"Failed to record score after auto-end error: {inner_e}")
             except Exception as inner_e:
                 logger.error(f"Failed to force end quiz after error: {inner_e}")

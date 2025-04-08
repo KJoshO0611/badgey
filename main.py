@@ -13,8 +13,8 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler(os.path.join('logs', 'badgey.log'))
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(os.path.join('logs', 'badgey.log'), encoding='utf-8')
     ]
 )
 logger = logging.getLogger('badgey')
